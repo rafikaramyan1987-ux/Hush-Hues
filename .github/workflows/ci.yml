@@ -1,0 +1,65 @@
+name: CI & GitHub Pages
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Build (web / GitHub Pages)
+        run: npm run build
+      - name: Bundle size must stay under 5 MB
+        run: |
+          size=$(du -sb dist | cut -f1)
+          echo "dist size: $size bytes"
+          test "$size" -lt 5000000
+      - name: Playwright smoke test (390px)
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+      - name: Build CrazyGames package
+        run: npm run build:crazygames
+      - name: Upload CrazyGames build (download = ready-to-upload zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-breath-crazygames
+          path: dist-crazygames/
+          if-no-files-found: error
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist/
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

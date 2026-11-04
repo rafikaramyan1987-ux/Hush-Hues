@@ -1,0 +1,31 @@
+{
+  "name": "last-breath",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Last Breath - a mobile-first space survival puzzle game",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:crazygames": "vite build --mode crazygames",
+    "zip:crazygames": "npm run build:crazygames && cd dist-crazygames && rm -f ../last-breath-crazygames.zip && zip -r -X ../last-breath-crazygames.zip .",
+    "preview": "vite preview --port 4173 --strictPort",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "check": "npm run lint && npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.20.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.14.0",
+    "typescript": "~5.9",
+    "typescript-eslint": "^8.72.1",
+    "vite": "^8.3.5",
+    "vitest": "^5.1.0"
+  }
+}
