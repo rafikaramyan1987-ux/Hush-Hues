@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#050912" />
+    <meta name="description" content="Last Breath — a space survival puzzle game. Solve rooms before your oxygen runs out." />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <title>Last Breath</title>
+    <!--CRAZYGAMES_SDK-->
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="stars" aria-hidden="true"></canvas>
+      <div id="alarm" aria-hidden="true"></div>
+      <main id="screen"><div id="boot" class="boot">Last Breath…</div></main>
+      <div id="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

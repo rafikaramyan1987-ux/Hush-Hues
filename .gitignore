@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-crazygames/
+*.zip
+test-results/
+playwright-report/
+.vite/
+*.log
+.DS_Store
+covers/
