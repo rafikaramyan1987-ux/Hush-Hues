@@ -3,7 +3,7 @@
  * Outside CrazyGames (GitHub Pages, local dev) every call is a safe no-op;
  * rewarded ads resolve as "nosdk" so the game can grant the reward for testing.
  */
-import { MIDGAME_AD_COOLDOWN_MS } from '../core/balance';
+import { midgameAllowed } from '../core/adPolicy';
 
 interface CGAdCallbacks {
   adStarted?: () => void;
@@ -44,6 +44,7 @@ class Ads {
   private playing = false;
   private loading = false;
   private lastMidgame = 0;
+  private readonly sessionStart = Date.now();
   private hooks: AdHooks = { onAdStart: () => {}, onAdEnd: () => {} };
 
   get available(): boolean {
@@ -130,10 +131,10 @@ class Ads {
     return (await this.request('rewarded')) ? 'rewarded' : 'failed';
   }
 
-  /** Midgame ad between runs; at most one every 3 minutes. */
-  async midgame(now = Date.now()): Promise<void> {
+  /** Midgame ad between levels only: never before level 3 is done, at most one every 3 minutes. */
+  async midgame(completedLevel: number, now = Date.now()): Promise<void> {
     if (!this.sdk) return;
-    if (this.lastMidgame && now - this.lastMidgame < MIDGAME_AD_COOLDOWN_MS) return;
+    if (!midgameAllowed(completedLevel, now, this.lastMidgame, this.sessionStart)) return;
     this.lastMidgame = now;
     await this.request('midgame');
   }

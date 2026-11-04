@@ -3,17 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-    <meta name="theme-color" content="#050912" />
-    <meta name="description" content="Last Breath — a space survival puzzle game. Solve rooms before your oxygen runs out." />
+    <meta name="theme-color" content="#2a2d5c" />
+    <meta name="description" content="Hush Hues — a calm colour-sorting puzzle. Move the balls until each tube holds one colour. No timer, no pressure, 300 levels." />
+    <meta property="og:title" content="Hush Hues" />
+    <meta property="og:description" content="A calm colour-sorting puzzle. No timer, no pressure, 300 levels." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="./icon-512.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Hush Hues" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <title>Last Breath</title>
+    <link rel="icon" href="./icon-192.png" type="image/png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <title>Hush Hues</title>
     <!--CRAZYGAMES_SDK-->
   </head>
   <body>
     <div id="app">
-      <canvas id="stars" aria-hidden="true"></canvas>
-      <div id="alarm" aria-hidden="true"></div>
-      <main id="screen"><div id="boot" class="boot">Last Breath…</div></main>
+      <main id="screen"><div id="boot" class="boot">Hush Hues…</div></main>
       <div id="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="./src/main.ts"></script>
