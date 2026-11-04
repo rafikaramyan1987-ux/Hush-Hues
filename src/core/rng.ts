@@ -6,9 +6,6 @@ export interface Rng {
   int(min: number, max: number): number;
   pick<T>(arr: readonly T[]): T;
   shuffle<T>(arr: T[]): T[];
-  chance(p: number): boolean;
-  /** derive an independent child generator */
-  fork(label: string | number): Rng;
   readonly seed: number;
 }
 
@@ -32,7 +29,7 @@ export function createRng(seed: number | string): Rng {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-  const rng: Rng = {
+  return {
     seed: s0,
     next,
     int: (min, max) => min + Math.floor(next() * (max - min + 1)),
@@ -44,24 +41,5 @@ export function createRng(seed: number | string): Rng {
       }
       return arr;
     },
-    chance: (p) => next() < p,
-    fork: (label) => createRng(hashString(`${s0}:${label}`)),
   };
-  return rng;
-}
-
-/** Date key in UTC, e.g. "2026-11-04" — identical for every player on a given day. */
-export function dailyKey(date: Date = new Date()): string {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(date.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-export function dailySeed(date: Date = new Date()): number {
-  return hashString(`last-breath-daily:${dailyKey(date)}`);
-}
-
-export function randomSeed(): number {
-  return (Math.random() * 4294967296) >>> 0;
 }

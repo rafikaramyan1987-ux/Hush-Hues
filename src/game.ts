@@ -1,727 +1,580 @@
-import * as B from './core/balance';
-import { createRng, dailyKey, dailySeed, randomSeed, type Rng } from './core/rng';
-import { createRunPlan, EVENT_RULES, meteorDash, type EventType, type RunPlan } from './core/run';
-import { getBrowserStorage, load, recordRun, save, type SaveData } from './core/save';
-import { buyUpgrade, upgradeCost, UPGRADES, type UpgradeId } from './core/upgrades';
-import { getLang, LANGS, setLang, t, type Key } from './i18n';
+import { FREE_UNDOS, UNDOS_PER_AD } from './core/adPolicy';
+import { applyMove, canMove, cloneBoard, isSolved, isTubeComplete, starsFor, undoMove, type Board, type Move } from './core/board';
+import { getLevel, LEVEL_COUNT, type Level } from './core/levels';
+import { getBrowserStorage, load, recordWin, save, type SaveData } from './core/save';
+import { solve } from './core/solver';
+import { getLang, LANGS, setLang, t } from './i18n';
 import { ads } from './platform/ads';
-import { audio } from './platform/audio';
-import type { PuzzleType } from './puzzles/types';
-import { fmtTime, h, reducedMotion } from './ui/dom';
-import { scene } from './ui/art';
-import { iconMute, iconPause, iconSound, logo } from './ui/icons';
-import { VIEW_FACTORIES, type PuzzleView } from './ui/views';
+import { audio, vibrate } from './platform/audio';
+import { BoardView } from './ui/boardView';
+import { h, svg } from './ui/dom';
+import { ICONS, LOGO } from './ui/icons';
 
-type Phase = 'menu' | 'puzzle' | 'cleared' | 'event' | 'leak' | 'end';
-type EndKind = 'win' | 'lose' | 'quit';
+export type Screen = 'home' | 'levels' | 'play' | 'won';
 
-interface RunState {
-  plan: RunPlan;
-  dailyKey: string | null;
-  room: number;
-  oxygen: number;
-  max: number;
-  parts: number;
-  hints: number;
-  time: number;
-  roomTime: number;
-  oxygenAdUsed: boolean;
-  dark: boolean;
-  roomsCleared: number;
-  eventRng: Rng;
+interface PlayState {
+  level: Level;
+  board: Board;
+  history: Move[];
+  selected: number | null;
+  undosLeft: number;
+  extraUsed: boolean;
+  /** true while the level-1 tutorial is still followed move by move */
+  tutorial: boolean;
+  won: boolean;
 }
 
-const TITLE_KEYS: Record<PuzzleType, [Key, Key]> = {
-  pipes: ['pipesTitle', 'pipesHelp'],
-  wires: ['wiresTitle', 'wiresHelp'],
-  code: ['codeTitle', 'codeHelp'],
-  cargo: ['cargoTitle', 'cargoHelp'],
-  valves: ['valvesTitle', 'valvesHelp'],
-};
-const EVENT_NAME: Record<EventType, Key> = { leak: 'evLeak', meteor: 'evMeteor', power: 'evPower', lucky: 'evLucky' };
+const icon = (name: keyof typeof ICONS) => svg(ICONS[name]);
 
 export class Game {
   private kv = getBrowserStorage();
   data: SaveData = load(this.kv);
-  phase: Phase = 'menu';
-  run: RunState | null = null;
-  view: PuzzleView | null = null;
-  private pauses = new Set<string>();
-  private screen: HTMLElement;
+  screen: Screen = 'home';
+  private play: PlayState | null = null;
+  private view: BoardView | null = null;
+  private screenEl: HTMLElement;
   private toastEl: HTMLElement;
-  private hud: { fill: HTMLElement; label: HTMLElement; room: HTMLElement; parts: HTMLElement; adBtn: HTMLElement | null; hintBtn: HTMLElement | null } | null = null;
-  private last = 0;
-  private alarmAcc = 0;
-  private breathAcc = 0;
-  private lowState = '';
-  private runsThisSession = 0;
   private toastTimer = 0;
-  private leak: { left: number; remaining: number; timer: HTMLElement; done: (ok: boolean) => void } | null = null;
+  private overlay: HTMLElement | null = null;
+  private busy = false;
+  private hud: { level: HTMLElement; moves: HTMLElement; undo: HTMLButtonElement; undoBadge: HTMLElement; extra: HTMLButtonElement } | null = null;
+  private hidden = false;
+  private adPlaying = false;
 
   constructor(private root: HTMLElement) {
-    this.screen = root.querySelector('#screen') as HTMLElement;
-    this.toastEl = root.querySelector('#toast') as HTMLElement;
+    this.screenEl = root.querySelector('#screen')!;
+    this.toastEl = root.querySelector('#toast')!;
     audio.setMuted(this.data.settings.muted);
-    setLang(this.data.settings.lang ?? getLang());
+    this.applySymbols();
     ads.setHooks({
       onAdStart: () => {
-        this.pauses.add('ad');
+        this.adPlaying = true;
         audio.setAdMuted(true);
+        this.root.classList.add('ad-playing');
         this.syncGameplay();
       },
       onAdEnd: () => {
-        this.pauses.delete('ad');
+        this.adPlaying = false;
         audio.setAdMuted(false);
+        this.root.classList.remove('ad-playing');
         this.syncGameplay();
       },
     });
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) this.pauses.add('hidden');
-      else this.pauses.delete('hidden');
-      this.last = performance.now();
+      this.hidden = document.hidden;
       this.syncGameplay();
     });
+    // AudioContext can only start after a user gesture
     const unlock = () => audio.unlock();
     window.addEventListener('pointerdown', unlock, { capture: true });
     window.addEventListener('keydown', unlock, { capture: true });
     window.addEventListener('keydown', (e) => this.onKey(e));
-    requestAnimationFrame((ts) => this.frame(ts));
   }
 
-  /* ---------------- persistence ---------------- */
+  /** gameplayStart only while a level is really being played. */
+  private syncGameplay(): void {
+    ads.setGameplay(this.screen === 'play' && !this.overlay && !this.hidden && !this.adPlaying && !!this.play && !this.play.won);
+  }
+
   private persist(): void {
     save(this.kv, this.data);
   }
 
-  /* ---------------- loop ---------------- */
-  private isActive(): boolean {
-    return !!this.run && (this.phase === 'puzzle' || this.phase === 'leak') && this.pauses.size === 0;
+  private applySymbols(): void {
+    this.root.classList.toggle('symbols', this.data.settings.symbols);
   }
 
-  private syncGameplay(): void {
-    ads.setGameplay(this.isActive());
+  private toast(msg: string): void {
+    this.toastEl.textContent = msg;
+    this.toastEl.classList.add('show');
+    clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('show'), 2200);
   }
 
-  private frame(ts: number): void {
-    const dt = Math.min(0.1, Math.max(0, (ts - (this.last || ts)) / 1000));
-    this.last = ts;
-    if (this.isActive() && this.run) {
-      const r = this.run;
-      r.time += dt;
-      if (this.phase === 'puzzle') {
-        r.roomTime += dt;
-        r.oxygen -= B.drainPerSecond(r.room, this.data.upgrades) * dt;
-        if (r.oxygen <= 0) {
-          r.oxygen = 0;
-          this.updateHud();
-          this.end('lose');
-        }
-      } else if (this.phase === 'leak' && this.leak) {
-        this.leak.left -= dt;
-        this.leak.timer.textContent = t('evLeakTap', { s: Math.max(0, Math.ceil(this.leak.left)) });
-        if (this.leak.left <= 0) this.leak.done(false);
-      }
-      this.lowAudio(dt);
+  private setScreen(name: Screen, content: HTMLElement): void {
+    this.closeOverlay();
+    this.view?.destroy();
+    this.view = null;
+    this.hud = null;
+    this.screen = name;
+    this.screenEl.textContent = '';
+    this.screenEl.append(content);
+    this.root.scrollTop = 0;
+    this.syncGameplay();
+  }
+
+  private soundButton(): HTMLButtonElement {
+    const btn = h('button', { class: 'icon-btn', type: 'button', 'data-testid': 'mute', 'aria-label': t('sound') });
+    const paint = () => {
+      btn.replaceChildren(icon(this.data.settings.muted ? 'soundOff' : 'soundOn'));
+      btn.setAttribute('aria-pressed', String(!this.data.settings.muted));
+    };
+    paint();
+    btn.addEventListener('click', () => {
+      this.data.settings.muted = !this.data.settings.muted;
+      audio.setMuted(this.data.settings.muted);
+      this.persist();
+      paint();
+      audio.tap();
+    });
+    return btn;
+  }
+
+  /* ------------------------------------------------------------------ home */
+
+  home(): void {
+    const next = Math.min(this.data.unlocked, LEVEL_COUNT);
+    const content = h(
+      'section',
+      { class: 'home', 'data-testid': 'home' },
+      h('div', { class: 'topbar' }, this.settingsButton(), h('span', { class: 'spacer' }), this.soundButton()),
+      h('div', { class: 'logo' }, svg(LOGO)),
+      h('h1', { class: 'title', text: t('title') }),
+      h('p', { class: 'tagline', text: t('tagline') }),
+      h(
+        'div',
+        { class: 'menu' },
+        h(
+          'button',
+          { class: 'btn primary big', type: 'button', 'data-testid': 'play', onclick: () => this.startLevel(next) },
+          icon('play'),
+          h('span', {}, h('b', { text: t('play') }), h('small', { text: t('continueLevel', { n: next }) })),
+        ),
+        h('button', { class: 'btn', type: 'button', 'data-testid': 'levels', onclick: () => this.levelSelect() }, icon('levels'), t('levels')),
+      ),
+    );
+    this.play = null;
+    this.setScreen('home', content);
+  }
+
+  private settingsButton(): HTMLButtonElement {
+    return h('button', { class: 'icon-btn', type: 'button', 'data-testid': 'settings', 'aria-label': t('settings'), onclick: () => this.openSettings() }, icon('gear'));
+  }
+
+  private openSettings(): void {
+    const s = this.data.settings;
+    const toggle = (label: string, id: string, get: () => boolean, set: (v: boolean) => void) => {
+      const btn = h('button', { class: 'toggle', type: 'button', role: 'switch', 'data-testid': id });
+      const paint = () => {
+        btn.setAttribute('aria-checked', String(get()));
+        btn.textContent = get() ? t('on') : t('off');
+      };
+      paint();
+      btn.addEventListener('click', () => {
+        set(!get());
+        this.persist();
+        paint();
+        audio.tap();
+      });
+      return h('label', { class: 'row' }, h('span', { text: label }), btn);
+    };
+    const lang = h('select', { 'data-testid': 'lang', 'aria-label': t('language') });
+    for (const [code, dict] of Object.entries(LANGS)) {
+      const o = h('option', { value: code, text: dict.langName });
+      if (code === getLang()) o.selected = true;
+      lang.append(o);
     }
-    if (this.run && this.hud) this.updateHud();
-    requestAnimationFrame((n) => this.frame(n));
+    lang.addEventListener('change', () => {
+      setLang(lang.value);
+      s.lang = lang.value;
+      this.persist();
+      this.closeOverlay();
+      this.refresh();
+    });
+    const panel = h(
+      'div',
+      { class: 'panel', 'data-testid': 'settings-panel' },
+      h('h2', { text: t('settings') }),
+      h('label', { class: 'row' }, h('span', { text: t('language') }), lang),
+      toggle(t('sound'), 'opt-sound', () => !s.muted, (v) => {
+        s.muted = !v;
+        audio.setMuted(s.muted);
+      }),
+      toggle(t('vibration'), 'opt-vibration', () => s.vibration, (v) => {
+        s.vibration = v;
+        vibrate(v, 15);
+      }),
+      toggle(t('symbols'), 'opt-symbols', () => s.symbols, (v) => {
+        s.symbols = v;
+        this.applySymbols();
+      }),
+      h('button', { class: 'btn primary', type: 'button', 'data-testid': 'close', onclick: () => this.closeOverlay() }, t('close')),
+    );
+    this.showOverlay(panel);
   }
 
-  private lowAudio(dt: number): void {
-    const r = this.run!;
-    const ratio = r.oxygen / r.max;
-    if (ratio < B.ALARM_RATIO && this.phase === 'puzzle') {
-      this.alarmAcc += dt;
-      this.breathAcc += dt;
-      if (this.alarmAcc > 2.2) {
-        this.alarmAcc = 0;
-        audio.alarm();
-      }
-      if (this.breathAcc > (ratio < B.LOW_OXYGEN_AD_RATIO ? 1.6 : 2.6)) {
-        this.breathAcc = 0;
-        audio.breath();
-      }
+  /** Re-render the current screen (after a language change). */
+  private refresh(): void {
+    if (this.screen === 'home') this.home();
+    else if (this.screen === 'levels') this.levelSelect();
+    else if (this.play) {
+      // keep the board as it is, just rebuild the chrome
+      const p = this.play;
+      this.renderPlay();
+      if (p.won) this.showWin(false);
     }
+  }
+
+  private showOverlay(panel: HTMLElement): void {
+    this.closeOverlay();
+    const ov = h('div', {
+      class: 'overlay',
+      onpointerdown: (e: Event) => {
+        if (e.target === ov && this.screen !== 'won') this.closeOverlay();
+      },
+    });
+    ov.append(panel);
+    this.root.append(ov);
+    this.overlay = ov;
+    this.syncGameplay();
+    panel.querySelector<HTMLElement>('button, select')?.focus({ preventScroll: true });
+  }
+
+  private closeOverlay(): void {
+    if (!this.overlay) return;
+    this.overlay.remove();
+    this.overlay = null;
+    if (this.screen === 'won') this.screen = 'play';
+    this.syncGameplay();
+  }
+
+  /* ---------------------------------------------------------------- levels */
+
+  levelSelect(): void {
+    const grid = h('div', { class: 'grid', 'data-testid': 'level-grid' });
+    let current: HTMLElement | null = null;
+    for (let n = 1; n <= LEVEL_COUNT; n++) {
+      const locked = n > this.data.unlocked;
+      const stars = this.data.stars[n - 1] ?? 0;
+      const btn = h(
+        'button',
+        {
+          class: `cell${locked ? ' locked' : ''}${stars ? ' done' : ''}`,
+          type: 'button',
+          'data-testid': `level-${n}`,
+          'aria-label': locked ? `${t('level', { n })} — ${t('locked')}` : `${t('level', { n })}${stars ? ` — ${t('stars', { n: stars })}` : ''}`,
+          disabled: locked,
+          onclick: () => this.startLevel(n),
+        },
+        locked ? icon('lock') : h('span', { class: 'num', text: n }),
+        !locked && h('span', { class: 'mini-stars' }, ...[1, 2, 3].map((i) => h('i', { class: i <= stars ? 'on' : '' }))),
+      );
+      if (n === this.data.unlocked) current = btn;
+      grid.append(btn);
+    }
+    const content = h(
+      'section',
+      { class: 'levels', 'data-testid': 'levels-screen' },
+      h(
+        'div',
+        { class: 'topbar' },
+        h('button', { class: 'icon-btn', type: 'button', 'data-testid': 'back', 'aria-label': t('back'), onclick: () => this.home() }, icon('back')),
+        h('h2', { text: t('levels') }),
+        this.soundButton(),
+      ),
+      h('div', { class: 'grid-wrap' }, grid),
+    );
+    this.setScreen('levels', content);
+    // scroll only the grid (scrollIntoView would also scroll the page container)
+    const wrap = content.querySelector<HTMLElement>('.grid-wrap')!;
+    requestAnimationFrame(() => {
+      if (current) wrap.scrollTop = current.offsetTop - wrap.clientHeight / 2 + current.clientHeight / 2;
+    });
+  }
+
+  /* ------------------------------------------------------------------ play */
+
+  startLevel(n: number): void {
+    const level = getLevel(Math.max(1, Math.min(LEVEL_COUNT, n)));
+    this.play = {
+      level,
+      board: cloneBoard(level.board),
+      history: [],
+      selected: null,
+      undosLeft: FREE_UNDOS,
+      extraUsed: false,
+      tutorial: level.n === 1,
+      won: false,
+    };
+    this.renderPlay();
+  }
+
+  private renderPlay(): void {
+    const p = this.play!;
+    const view = new BoardView((i) => this.tap(i));
+    const levelEl = h('div', { class: 'lvl', 'data-testid': 'level-label', text: t('level', { n: p.level.n }) });
+    const movesEl = h('div', { class: 'moves', 'data-testid': 'moves' });
+    const undoBadge = h('span', { class: 'badge' });
+    const undo = h(
+      'button',
+      { class: 'tool', type: 'button', 'data-testid': 'undo', onclick: () => void this.undo() },
+      icon('undo'),
+      h('span', { class: 'lbl', text: t('undo') }),
+      undoBadge,
+    );
+    const extra = h(
+      'button',
+      { class: 'tool', type: 'button', 'data-testid': 'extra', onclick: () => void this.extraTube() },
+      icon('tube'),
+      h('span', { class: 'lbl', text: t('extraTube') }),
+      h('span', { class: 'badge ad' }, svg(ICONS.ad)),
+    );
+    const restart = h(
+      'button',
+      { class: 'tool', type: 'button', 'data-testid': 'restart', onclick: () => this.restart() },
+      icon('restart'),
+      h('span', { class: 'lbl', text: t('restart') }),
+    );
+    const content = h(
+      'section',
+      { class: 'play', 'data-testid': 'play-screen', 'data-level': p.level.n },
+      h(
+        'div',
+        { class: 'topbar' },
+        h('button', { class: 'icon-btn', type: 'button', 'data-testid': 'home', 'aria-label': t('home'), onclick: () => this.home() }, icon('home')),
+        h('div', { class: 'title-block' }, levelEl, movesEl),
+        this.soundButton(),
+      ),
+      h('div', { class: 'hint-text', 'data-testid': 'hint', text: p.tutorial ? t('hint') : '' }),
+      view.el,
+      h('div', { class: 'toolbar' }, undo, extra, restart),
+    );
+    this.setScreen('play', content);
+    this.view = view;
+    this.hud = { level: levelEl, moves: movesEl, undo, undoBadge, extra };
+    view.setBoard(p.board);
+    p.board.forEach((tube, i) => view.setComplete(i, isTubeComplete(tube) ? tube[0]! : null));
+    if (p.selected !== null) view.lift(p.selected);
+    view.setSelected(p.selected);
+    this.updateHud();
+    this.updateHint();
   }
 
   private updateHud(): void {
-    const r = this.run!, hud = this.hud!;
-    const ratio = Math.max(0, r.oxygen / r.max);
-    hud.fill.style.transform = `scaleX(${ratio})`;
-    const secs = r.oxygen / B.drainPerSecond(r.room, this.data.upgrades);
-    hud.label.textContent = `${t('oxygen')} ${Math.ceil(ratio * 100)}% · ${fmtTime(secs)}`;
-    const low = ratio < B.LOW_OXYGEN_AD_RATIO ? 'critical' : ratio < B.ALARM_RATIO ? 'low' : '';
-    if (low !== this.lowState) {
-      this.lowState = low;
-      this.root.classList.toggle('low', low !== '');
-      this.root.classList.toggle('critical', low === 'critical');
+    const p = this.play;
+    if (!p || !this.hud) return;
+    this.hud.moves.textContent = t('moves', { n: p.history.length });
+    const needAd = p.undosLeft <= 0;
+    this.hud.undoBadge.replaceChildren(needAd ? svg(ICONS.ad) : String(p.undosLeft));
+    this.hud.undoBadge.classList.toggle('ad', needAd);
+    this.hud.undo.disabled = p.history.length === 0 || p.won;
+    this.hud.extra.disabled = p.extraUsed || p.won;
+    this.hud.extra.classList.toggle('used', p.extraUsed);
+  }
+
+  private updateHint(): void {
+    const p = this.play;
+    if (!p || !this.view) return;
+    if (!p.tutorial) {
+      this.view.setHint(null);
+      return;
     }
-    if (hud.adBtn) hud.adBtn.hidden = !(this.phase === 'puzzle' && !r.oxygenAdUsed && ratio < B.LOW_OXYGEN_AD_RATIO);
+    const m = p.level.solution[p.history.length];
+    if (!m) return this.view.setHint(null);
+    this.view.setHint(p.selected === null ? m.from : p.selected === m.from ? m.to : null);
   }
 
-  /* ---------------- helpers ---------------- */
-  toast(msg: string): void {
-    this.toastEl.textContent = msg;
-    this.toastEl.classList.remove('show');
-    void this.toastEl.offsetWidth;
-    this.toastEl.classList.add('show');
-    clearTimeout(this.toastTimer);
-    this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('show'), 2700);
+  private haptic(pattern: number | number[]): void {
+    vibrate(this.data.settings.vibration, pattern);
   }
 
-  private shake(): void {
-    if (reducedMotion()) return;
-    this.root.classList.remove('shake');
-    void this.root.offsetWidth;
-    this.root.classList.add('shake');
-    setTimeout(() => this.root.classList.remove('shake'), 500);
-  }
-
-  private flash(kind: 'good' | 'bad'): void {
-    const f = h('div', { class: `flash ${kind}` });
-    this.root.append(f);
-    setTimeout(() => f.remove(), 600);
-  }
-
-  private show(...children: (Node | null)[]): void {
-    this.view?.destroy?.();
-    this.view = null;
-    this.screen.replaceChildren(...children.filter((c): c is Node => !!c));
-    this.screen.scrollTop = 0;
-  }
-
-  private btn(label: string, onClick: () => void, cls = '', attrs: Record<string, string | boolean> = {}): HTMLButtonElement {
-    return h('button', { type: 'button', class: `btn ${cls}`, ...attrs, onclick: () => { audio.click(); onClick(); } }, label);
-  }
-
-  private muteButton(): HTMLButtonElement {
-    const b = h('button', { type: 'button', class: 'icon-btn', 'aria-label': audio.isMuted() ? t('soundOff') : t('soundOn'), 'data-testid': 'mute' });
-    const paint = () => {
-      b.replaceChildren(audio.isMuted() ? iconMute() : iconSound());
-      b.setAttribute('aria-label', audio.isMuted() ? t('soundOff') : t('soundOn'));
-    };
-    b.addEventListener('click', () => {
-      audio.unlock();
-      audio.setMuted(!audio.isMuted());
-      this.data.settings.muted = audio.isMuted();
-      this.persist();
-      paint();
-    });
-    paint();
-    return b;
-  }
-
-  private ox(seconds: number): number {
-    return B.secondsToOxygen(seconds, this.run?.room ?? 0, this.data.upgrades);
-  }
-
-  private changeOxygen(units: number): void {
-    const r = this.run!;
-    r.oxygen = B.addOxygen(r.oxygen, units, r.max);
-  }
-
-  /* ---------------- menus ---------------- */
-  menu(): void {
-    this.phase = 'menu';
-    this.run = null;
-    this.hud = null;
-    this.root.classList.remove('low', 'critical');
-    this.lowState = '';
-    this.syncGameplay();
-    const today = dailyKey();
-    const d = this.data.daily && this.data.daily.key === today ? this.data.daily : null;
-    const langSel = h('select', { class: 'lang', 'aria-label': t('language'), 'data-testid': 'lang' },
-      ...Object.entries(LANGS).map(([code, dict]) => {
-        const o = h('option', { value: code }, dict.langName);
-        if (code === getLang()) o.selected = true;
-        return o;
-      }));
-    langSel.addEventListener('change', () => {
-      setLang(langSel.value);
-      this.data.settings.lang = langSel.value;
-      this.persist();
-      this.menu();
-    });
-    this.show(
-      h('div', { class: 'title-screen' },
-        logo(t('title')),
-        h('p', { class: 'tagline' }, t('tagline')),
-        h('div', { class: 'menu' },
-          this.btn(t('play'), () => this.startRun(false), 'primary', { 'data-testid': 'play' }),
-          h('div', { class: 'daily-wrap' },
-            this.btn(t('daily'), () => this.startRun(true), '', { 'data-testid': 'daily' }),
-            h('small', {}, d ? (d.escaped ? t('dailyEscaped') : t('dailyBest', { rooms: d.bestRooms })) : t('dailySub', { date: today }))),
-          this.btn(t('workshop'), () => this.workshop(), '', { 'data-testid': 'workshop' }),
-          h('div', { class: 'row' },
-            this.btn(t('stats'), () => this.stats(), 'small'),
-            this.btn(t('howTo'), () => this.howTo(), 'small'))),
-        h('div', { class: 'parts-bank' }, `⚙ ${this.data.parts} ${t('parts')}`),
-        h('div', { class: 'settings-row' }, langSel, this.muteButton())),
-    );
-  }
-
-  private panel(title: string, ...body: (Node | null)[]): HTMLElement {
-    return h('div', { class: 'panel' }, h('h2', {}, title), ...body.filter((b): b is Node => !!b));
-  }
-
-  private howTo(): void {
-    this.show(this.panel(t('howTo'), h('p', {}, t('howToText')), this.btn(t('back'), () => this.menu())));
-  }
-
-  private stats(): void {
-    const st = this.data.stats;
-    const row = (k: Key, v: string | number) => h('li', {}, h('span', {}, t(k)), h('b', {}, v));
-    this.show(
-      this.panel(t('stats'),
-        h('ul', { class: 'stats' },
-          row('statRuns', st.runs),
-          row('statEscapes', st.escapes),
-          row('statRooms', st.roomsCleared),
-          row('statBest', `${st.bestRooms}/10`),
-          row('statBestTime', st.bestEscapeTime ? fmtTime(st.bestEscapeTime) : t('none'))),
-        this.btn(t('back'), () => this.menu())),
-    );
-  }
-
-  private workshop(): void {
-    const names: Record<UpgradeId, [Key, Key]> = {
-      tank: ['upTank', 'upTankDesc'],
-      drain: ['upDrain', 'upDrainDesc'],
-      tools: ['upTools', 'upToolsDesc'],
-      hints: ['upHints', 'upHintsDesc'],
-      scanner: ['upScanner', 'upScannerDesc'],
-    };
-    const list = h('ul', { class: 'upgrades' });
-    const bank = h('div', { class: 'parts-bank big' });
-    const render = () => {
-      bank.textContent = `⚙ ${this.data.parts} ${t('parts')}`;
-      list.replaceChildren(
-        ...UPGRADES.map((u) => {
-          const lvl = this.data.upgrades[u.id];
-          const cost = upgradeCost(u.id, lvl);
-          const pips = h('span', { class: 'pips' }, ...Array.from({ length: u.maxLevel }, (_, i) => h('i', { class: i < lvl ? 'on' : '' })));
-          const buy = cost === null
-            ? h('span', { class: 'maxed' }, t('maxed'))
-            : this.btn(t('buy', { c: `⚙${cost}` }), () => {
-                const res = buyUpgrade(u.id, this.data.upgrades, this.data.parts);
-                if (res.ok) {
-                  this.data.upgrades = res.levels;
-                  this.data.parts = res.parts;
-                  this.persist();
-                  audio.success();
-                  render();
-                } else this.toast(t('notEnoughParts'));
-              }, `small${cost > this.data.parts ? ' disabled' : ''}`, { 'data-testid': `buy-${u.id}` });
-          return h('li', { class: 'upgrade' },
-            h('div', {}, h('b', {}, t(names[u.id][0])), h('small', {}, t(names[u.id][1])), h('div', {}, pips, h('small', {}, t('level', { l: lvl, m: u.maxLevel })))),
-            buy);
-        }),
-      );
-    };
-    render();
-    this.show(this.panel(t('workshop'), h('p', {}, t('workshopText')), bank, list, this.btn(t('back'), () => this.menu())));
-  }
-
-  /* ---------------- run flow ---------------- */
-  async startRun(daily: boolean): Promise<void> {
-    if (this.runsThisSession > 0) await ads.midgame();
-    const seed = daily ? dailySeed() : randomSeed();
-    const plan = createRunPlan(seed);
-    const up = this.data.upgrades;
-    this.run = {
-      plan,
-      dailyKey: daily ? dailyKey() : null,
-      room: 0,
-      oxygen: B.maxOxygen(up),
-      max: B.maxOxygen(up),
-      parts: 0,
-      hints: B.hintsPerRun(up),
-      time: 0,
-      roomTime: 0,
-      oxygenAdUsed: false,
-      dark: false,
-      roomsCleared: 0,
-      eventRng: createRng(plan.eventSeed),
-    };
-    this.pauses.clear();
-    if (document.hidden) this.pauses.add('hidden');
-    this.enterRoom(0);
-  }
-
-  private hudEl(): HTMLElement {
-    const r = this.run!;
-    const fill = h('div', { class: 'o2-fill' });
-    const label = h('span', { class: 'o2-label', 'data-testid': 'oxygen' });
-    const room = h('span', { class: 'room-label' }, t('room', { n: r.room + 1, total: B.ROOM_COUNT }));
-    const parts = h('span', { class: 'parts-label' }, `⚙ ${r.parts}`);
-    const pause = h('button', { type: 'button', class: 'icon-btn', 'aria-label': t('pause'), onclick: () => this.pauseMenu() }, iconPause());
-    this.hud = { fill, label, room, parts, adBtn: null, hintBtn: null };
-    return h('header', { class: 'hud' },
-      h('div', { class: 'o2-bar' }, fill, label),
-      h('div', { class: 'hud-row' }, room, parts, h('span', { class: 'spacer' }), this.muteButton(), pause));
-  }
-
-  private enterRoom(index: number): void {
-    const r = this.run!;
-    r.room = index;
-    r.roomTime = 0;
-    const plan = r.plan.rooms[index]!;
-    const [titleKey, helpKey] = TITLE_KEYS[plan.type];
-    const hud = this.hudEl();
-    const stage = h('div', { class: `stage${r.dark ? ' dark' : ''}` });
-    const view = VIEW_FACTORIES[plan.type](createRng(plan.seed), plan.difficulty, {
-      onSolved: () => this.solved(),
-      onPenalty: (sec) => {
-        this.changeOxygen(-this.ox(sec));
-        this.toast(t('codeWrong', { n: Math.round(this.ox(sec)) }));
-        this.flash('bad');
-      },
-      sfx: { click: () => audio.click(), snap: () => audio.snap(), fail: () => audio.fail() },
-    });
-    stage.append(view.el);
-    if (r.dark) {
-      const light = h('div', { class: 'flashlight' });
-      stage.append(light);
-      const aim = (e: PointerEvent) => {
-        const rect = stage.getBoundingClientRect();
-        stage.style.setProperty('--fx', `${e.clientX - rect.left}px`);
-        stage.style.setProperty('--fy', `${e.clientY - rect.top}px`);
-      };
-      stage.addEventListener('pointermove', aim, { capture: true });
-      stage.addEventListener('pointerdown', aim, { capture: true });
-    }
-    const hintBtn = this.btn(t('hint', { n: r.hints }), () => this.useHint(), 'small', { 'data-testid': 'hint' });
-    if (r.hints <= 0) hintBtn.classList.add('disabled');
-    const skipBtn = this.btn(t('skip', { n: B.skipCost(index) }), () => this.skip(), 'small danger', { 'data-testid': 'skip' });
-    const adBtn = this.btn(t('adOxygen'), () => this.oxygenAd(), 'small ad', { 'data-testid': 'ad-oxygen' });
-    adBtn.hidden = true;
-    this.hud!.adBtn = adBtn;
-    this.hud!.hintBtn = hintBtn;
-    this.show(
-      hud,
-      h('section', { class: 'room', 'data-testid': 'room', 'data-type': plan.type, 'data-room': index },
-        h('div', { class: 'room-head' },
-          h('h2', {}, t(titleKey)),
-          h('p', {}, r.dark ? t('dark') : t(helpKey))),
-        stage,
-        h('div', { class: 'room-actions' }, hintBtn, adBtn, skipBtn)),
-    );
-    this.view = view;
-    this.phase = 'puzzle';
-    this.last = performance.now();
-    this.syncGameplay();
-  }
-
-  private useHint(): void {
-    const r = this.run!;
-    if (this.phase !== 'puzzle' || !this.view) return;
-    if (r.hints <= 0) return this.toast(t('hint', { n: 0 }));
-    if (this.view.hint()) {
-      r.hints--;
-      const b = this.hud?.hintBtn;
-      if (b) {
-        b.textContent = t('hint', { n: r.hints });
-        if (r.hints <= 0) b.classList.add('disabled');
+  tap(i: number): void {
+    const p = this.play;
+    const view = this.view;
+    if (!p || !view || p.won || this.busy || this.overlay) return;
+    const tube = p.board[i];
+    if (!tube) return;
+    if (p.selected === null) {
+      if (tube.length === 0 || isTubeComplete(tube)) {
+        view.shake(i);
+        return;
+      }
+      p.selected = i;
+      view.lift(i);
+      audio.lift(tube[tube.length - 1]!);
+    } else if (p.selected === i) {
+      view.lower(i);
+      p.selected = null;
+    } else if (canMove(p.board, p.selected, i)) {
+      const from = p.selected;
+      const color = p.board[from]![p.board[from]!.length - 1]!;
+      applyMove(p.board, { from, to: i });
+      if (p.tutorial && !sameMove(p.level.solution[p.history.length], { from, to: i })) p.tutorial = false;
+      p.history.push({ from, to: i });
+      p.selected = null;
+      const ms = view.move(from, i);
+      const done = isTubeComplete(p.board[i]!);
+      window.setTimeout(() => {
+        audio.drop(color);
+        this.haptic(done ? [12, 40, 18] : 8);
+        if (done) {
+          audio.tubeDone(color);
+          view.setComplete(i, color);
+        }
+      }, ms * 0.85);
+      if (isSolved(p.board)) this.win(ms);
+    } else {
+      // not allowed: put the ball back and pick up the tapped tube instead (if it can be picked)
+      audio.nope();
+      view.shake(i);
+      view.lower(p.selected);
+      p.selected = null;
+      if (tube.length > 0 && !isTubeComplete(tube)) {
+        p.selected = i;
+        view.lift(i);
       }
     }
+    view.setSelected(p.selected);
+    this.updateHud();
+    this.updateHint();
   }
 
-  private async oxygenAd(): Promise<void> {
-    const r = this.run!;
-    if (r.oxygenAdUsed || this.pauses.has('ad-request')) return;
-    this.pauses.add('ad-request');
-    this.syncGameplay();
-    const res = await ads.rewarded();
-    this.pauses.delete('ad-request');
-    this.last = performance.now();
-    this.syncGameplay();
-    if (!this.run || this.run !== r) return;
-    if (res === 'failed') return this.toast(t('adFailed'));
-    if (res === 'nosdk') this.toast(t('adNoSdk'));
-    r.oxygenAdUsed = true;
-    this.changeOxygen(B.secondsToOxygen(B.REWARD_AD_SECONDS, r.room, this.data.upgrades));
-    this.flash('good');
-    audio.success();
-  }
-
-  private skip(): void {
-    const r = this.run!;
-    if (this.phase !== 'puzzle') return;
-    this.changeOxygen(-B.skipCost(r.room));
-    this.flash('bad');
-    audio.fail();
-    if (r.oxygen <= 0) return this.end('lose');
-    this.cleared(null);
-  }
-
-  solved(): void {
-    if (this.phase !== 'puzzle' || !this.run) return;
-    const r = this.run;
-    const rew = B.solveReward(r.room, this.data.upgrades, r.roomTime);
-    this.changeOxygen(rew.oxygen);
-    r.parts += rew.parts;
-    r.roomsCleared++;
-    audio.success();
-    this.flash('good');
-    this.cleared(rew);
-  }
-
-  private cleared(rew: { oxygen: number; parts: number; fast: boolean } | null): void {
-    const r = this.run!;
-    r.dark = false;
-    this.phase = 'cleared';
-    this.syncGameplay();
-    const last = r.room === B.ROOM_COUNT - 1;
-    const next = r.plan.events[r.room] ?? null;
-    const scanner = this.data.upgrades.scanner > 0 && !last
-      ? h('p', { class: 'scanner' }, next ? t('scannerNext', { event: t(EVENT_NAME[next]) }) : t('scannerQuiet'))
-      : null;
-    this.show(
-      this.hudEl(),
-      h('section', { class: 'card cleared', 'data-testid': 'cleared' },
-        h('h2', {}, rew ? t('cleared') : t('skipped')),
-        rew ? h('p', { class: 'gain' }, t('gainOxygen', { n: rew.oxygen }), ' · ', t('gainParts', { n: rew.parts })) : null,
-        rew?.fast ? h('p', { class: 'bonus' }, t('fastBonus')) : null,
-        scanner,
-        this.btn(last ? t('toPod') : t('nextRoom'), () => {
-          if (last) return this.end('win');
-          if (next) this.event(next);
-          else this.enterRoom(r.room + 1);
-        }, 'primary', { 'data-testid': 'next' })),
-    );
-  }
-
-  private eventCard(type: EventType, text: string, choices: HTMLElement[]): void {
-    this.phase = 'event';
-    this.syncGameplay();
-    this.show(
-      this.hudEl(),
-      h('section', { class: `card event ev-${type}`, 'data-testid': 'event', 'data-event': type },
-        scene(type),
-        h('h2', {}, t(EVENT_NAME[type])),
-        h('p', {}, text),
-        h('div', { class: 'choices' }, ...choices)),
-    );
-  }
-
-  private outcome(type: EventType, text: string, good: boolean): void {
-    const r = this.run!;
-    this.flash(good ? 'good' : 'bad');
-    if (r.oxygen <= 0) return this.end('lose');
-    this.eventCard(type, text, [this.btn(t('continue'), () => this.enterRoom(r.room + 1), 'primary', { 'data-testid': 'continue' })]);
-  }
-
-  private event(type: EventType): void {
-    const r = this.run!;
-    const R = EVENT_RULES;
-    const choice = (label: string, fn: () => void, enabled = true, testid = '') => {
-      const b = this.btn(label, () => (enabled ? fn() : this.toast(t('notEnoughParts'))), enabled ? '' : 'disabled', { 'data-testid': testid });
-      return b;
-    };
-    if (type === 'leak') {
-      audio.hiss();
-      this.shake();
-      this.eventCard(type, t('evLeakText'), [
-        choice(t('evLeakSeal', { n: R.leak.sealParts }), () => {
-          r.parts -= R.leak.sealParts;
-          this.outcome(type, t('evLeakSealed', { n: R.leak.sealParts }), false);
-        }, r.parts >= R.leak.sealParts, 'choice-0'),
-        choice(t('evLeakFix'), () => this.leakGame(), true, 'choice-1'),
-      ]);
-    } else if (type === 'meteor') {
-      audio.boom();
-      this.shake();
-      this.eventCard(type, t('evMeteorText'), [
-        choice(t('evMeteorCover', { n: R.meteor.coverOxygen }), () => {
-          this.changeOxygen(-R.meteor.coverOxygen);
-          this.outcome(type, t('evMeteorWaited', { n: R.meteor.coverOxygen }), false);
-        }, true, 'choice-0'),
-        choice(t('evMeteorDash', { n: R.meteor.dashRiskOxygen }), () => {
-          const eff = meteorDash(r.eventRng.next());
-          this.changeOxygen(eff.oxygen);
-          r.parts += eff.parts;
-          if (eff.oxygen < 0) {
-            audio.boom();
-            this.shake();
-          }
-          this.outcome(type, eff.oxygen < 0 ? t('evMeteorHit', { n: -eff.oxygen }) : t('evMeteorSafe'), eff.oxygen >= 0);
-        }, true, 'choice-1'),
-      ]);
-    } else if (type === 'power') {
-      this.eventCard(type, t('evPowerText'), [
-        choice(t('evPowerBattery', { n: R.power.batteryParts }), () => {
-          r.parts -= R.power.batteryParts;
-          this.outcome(type, t('evPowerLit'), true);
-        }, r.parts >= R.power.batteryParts, 'choice-0'),
-        choice(t('evPowerDark', { n: R.power.darkBonusParts }), () => {
-          r.parts += R.power.darkBonusParts;
-          r.dark = true;
-          this.outcome(type, t('evPowerGoDark'), true);
-        }, true, 'choice-1'),
-      ]);
-    } else {
-      audio.pop();
-      this.eventCard(type, t('evLuckyText'), [
-        choice(t('evLuckyTake', { o: R.lucky.oxygen, p: R.lucky.parts }), () => {
-          this.changeOxygen(R.lucky.oxygen);
-          r.parts += R.lucky.parts;
-          audio.success();
-          this.outcome(type, t('gainOxygen', { n: R.lucky.oxygen }), true);
-        }, true, 'choice-0'),
-      ]);
+  private async rewarded(): Promise<boolean> {
+    if (this.busy) return false;
+    this.busy = true;
+    try {
+      const res = await ads.rewarded();
+      if (res === 'failed') {
+        this.toast(t('noAd'));
+        return false;
+      }
+      return true;
+    } finally {
+      this.busy = false;
     }
   }
 
-  private leakGame(): void {
-    const R = EVENT_RULES.leak;
-    const area = h('div', { class: 'leak-area', 'data-testid': 'leak-area' });
-    const timer = h('p', { class: 'leak-timer' }, t('evLeakTap', { s: R.fixSeconds }));
-    this.leak = {
-      left: R.fixSeconds,
-      remaining: R.fixTaps,
-      timer,
-      done: (ok) => {
-        if (!this.leak) return;
-        this.leak = null;
-        if (ok) {
-          audio.success();
-          this.outcome('leak', t('evLeakOk'), true);
-        } else {
-          this.changeOxygen(-R.fixFailOxygen);
-          audio.fail();
-          this.shake();
-          this.outcome('leak', t('evLeakFail', { n: R.fixFailOxygen }), false);
-        }
-      },
-    };
-    for (let i = 0; i < R.fixTaps; i++) {
-      const b = h('button', {
-        type: 'button',
-        class: 'leak-spot',
-        'aria-label': 'leak',
-        style: `left:${10 + Math.random() * 70}%;top:${10 + Math.random() * 70}%`,
-      });
-      b.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        if (b.classList.contains('fixed') || !this.leak) return;
-        b.classList.add('fixed');
-        audio.pop();
-        if (--this.leak.remaining <= 0) this.leak.done(true);
-      });
-      b.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') b.dispatchEvent(new PointerEvent('pointerdown'));
-      });
-      area.append(b);
+  async undo(): Promise<void> {
+    const p = this.play;
+    if (!p || !this.view || p.won || p.history.length === 0 || this.busy) return;
+    if (p.undosLeft <= 0) {
+      if (!(await this.rewarded())) return;
+      if (this.play !== p) return;
+      p.undosLeft += UNDOS_PER_AD;
     }
-    this.show(this.hudEl(), h('section', { class: 'card event ev-leak' }, h('h2', {}, t('evLeak')), timer, area));
-    this.phase = 'leak';
-    this.last = performance.now();
-    this.syncGameplay();
+    if (p.selected !== null) {
+      this.view.lower(p.selected);
+      p.selected = null;
+    }
+    const m = p.history.pop()!;
+    if (isTubeComplete(p.board[m.to]!)) this.view.setComplete(m.to, null);
+    undoMove(p.board, m);
+    p.undosLeft--;
+    p.tutorial = false;
+    this.view.move(m.to, m.from);
+    const ball = p.board[m.from]![p.board[m.from]!.length - 1]!;
+    audio.lift(ball);
+    this.view.setSelected(null);
+    this.updateHud();
+    this.updateHint();
   }
 
-  private pauseMenu(): void {
-    if (!this.run || this.pauses.has('menu')) return;
-    this.pauses.add('menu');
-    this.syncGameplay();
-    const overlay = h('div', { class: 'overlay', 'data-testid': 'pause-menu' });
-    const close = () => {
-      overlay.remove();
-      this.pauses.delete('menu');
-      this.last = performance.now();
-      this.syncGameplay();
-    };
-    overlay.append(
-      h('div', { class: 'panel' },
-        h('h2', {}, t('paused')),
-        this.btn(t('resume'), close, 'primary'),
-        h('div', { class: 'row center' }, this.muteButton()),
-        this.btn(t('quitRun'), () => {
-          this.end('quit');
-          close();
-        }, 'danger', { 'data-testid': 'quit' })),
-    );
-    this.root.append(overlay);
+  async extraTube(): Promise<void> {
+    const p = this.play;
+    if (!p || !this.view || p.won || p.extraUsed || this.busy) return;
+    if (!(await this.rewarded())) return;
+    if (this.play !== p || p.extraUsed) return;
+    p.extraUsed = true;
+    p.tutorial = false;
+    p.board.push([]);
+    this.view.addTube();
+    audio.tubeDone(1);
+    this.updateHud();
+    this.updateHint();
   }
 
-  private end(kind: EndKind): void {
-    const r = this.run;
-    if (!r || this.phase === 'end') return;
-    this.phase = 'end';
-    this.syncGameplay();
-    this.leak = null;
-    this.root.classList.remove('low', 'critical');
-    this.lowState = '';
-    const escaped = kind === 'win';
-    const earned = Math.max(0, r.parts);
-    const prevBest = this.data.stats.bestRooms;
-    this.data = recordRun(this.data, { roomsCleared: r.roomsCleared, escaped, seconds: r.time, parts: earned, dailyKey: r.dailyKey });
+  restart(): void {
+    const p = this.play;
+    if (!p || this.busy) return;
+    audio.tap();
+    // the extra tube stays if it was earned; undos reset to the free amount
+    const board = cloneBoard(p.level.board);
+    if (p.extraUsed) board.push([]);
+    Object.assign(p, { board, history: [], selected: null, undosLeft: FREE_UNDOS, tutorial: p.level.n === 1, won: false });
+    this.renderPlay();
+  }
+
+  private win(delayMs: number): void {
+    const p = this.play!;
+    p.won = true;
+    const stars = starsFor(p.history.length, p.level.par);
+    this.data = recordWin(this.data, p.level.n, stars);
     this.persist();
-    this.runsThisSession++;
-    if (escaped) {
-      ads.happytime();
-      audio.success();
-    } else if (kind === 'lose') {
-      audio.fail();
-      this.shake();
-    }
-    const record = r.roomsCleared > prevBest;
-    const partsLine = h('p', { 'data-testid': 'parts-earned' }, t('partsEarned', { n: earned }));
-    let doubled = false;
-    let adBusy = false;
-    const doubleBtn = earned > 0
-      ? this.btn(t('adDouble'), async () => {
-          if (doubled || adBusy) return;
-          adBusy = true;
-          const res = await ads.rewarded();
-          adBusy = false;
-          if (res === 'failed') return this.toast(t('adFailed'));
-          if (res === 'nosdk') this.toast(t('adNoSdk'));
-          doubled = true;
-          this.data.parts += earned;
-          this.persist();
-          partsLine.textContent = `${t('partsEarned', { n: earned * 2 })} — ${t('doubled')}`;
-          doubleBtn?.remove();
-          audio.success();
-        }, 'ad', { 'data-testid': 'ad-double' })
-      : null;
-    const title = kind === 'win' ? t('winTitle') : kind === 'lose' ? t('loseTitle') : t('quitTitle');
-    this.hud = null;
-    this.show(
-      h('section', { class: `card end ${kind}`, 'data-testid': 'end', 'data-result': kind },
-        scene(kind),
-        h('h2', {}, title),
-        kind !== 'quit' ? h('p', {}, kind === 'win' ? t('winText') : t('loseText')) : null,
-        h('ul', { class: 'stats' },
-          h('li', {}, t('roomsCleared', { n: r.roomsCleared })),
-          h('li', {}, t('runTime', { t: fmtTime(r.time) }))),
-        partsLine,
-        record ? h('p', { class: 'bonus' }, t('newRecord')) : null,
-        doubleBtn,
-        this.btn(t('again'), () => this.startRun(!!r.dailyKey), 'primary', { 'data-testid': 'again' }),
-        this.btn(t('menu'), () => this.menu(), '', { 'data-testid': 'menu' })),
+    this.syncGameplay();
+    ads.happytime();
+    this.updateHud();
+    this.view?.setHint(null);
+    window.setTimeout(() => {
+      if (this.play !== p) return;
+      audio.win();
+      this.haptic([20, 60, 20, 60, 30]);
+      this.root.classList.add('celebrate');
+      window.setTimeout(() => this.root.classList.remove('celebrate'), 1200);
+      this.showWin(true);
+    }, delayMs + 350);
+  }
+
+  private showWin(animate: boolean): void {
+    const p = this.play!;
+    const stars = starsFor(p.history.length, p.level.par);
+    const isLast = p.level.n >= LEVEL_COUNT;
+    const panel = h(
+      'div',
+      { class: `panel win${animate ? ' animate' : ''}`, 'data-testid': 'win', 'data-stars': stars },
+      h('h2', { text: t('sorted') }),
+      h('div', { class: 'stars' }, ...[1, 2, 3].map((i) => h('span', { class: `star${i <= stars ? ' on' : ''}`, style: `--i:${i}` }, svg(ICONS.star)))),
+      h('p', { class: 'muted', text: `${t('level', { n: p.level.n })} · ${t('moves', { n: p.history.length })}` }),
+      !isLast && h('button', { class: 'btn primary big', type: 'button', 'data-testid': 'next', onclick: () => void this.next() }, t('next')),
+      h(
+        'div',
+        { class: 'row-btns' },
+        h('button', { class: 'btn', type: 'button', 'data-testid': 'replay', onclick: () => this.startLevel(p.level.n) }, icon('restart'), t('replay')),
+        h('button', { class: 'btn', type: 'button', 'data-testid': 'to-levels', onclick: () => this.levelSelect() }, icon('levels'), t('levels')),
+      ),
     );
-    this.run = null;
+    this.showOverlay(panel);
+    this.screen = 'won';
+  }
+
+  async next(): Promise<void> {
+    const p = this.play;
+    if (!p || this.busy) return;
+    this.busy = true;
+    try {
+      this.closeOverlay();
+      // natural break between levels: the only place a midgame ad may appear
+      await ads.midgame(p.level.n);
+    } finally {
+      this.busy = false;
+    }
+    this.startLevel(p.level.n + 1);
   }
 
   private onKey(e: KeyboardEvent): void {
-    // Keep arrows/space from scrolling the host page (important inside an iframe).
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key) && e.target === document.body) e.preventDefault();
-    if (e.key === 'Escape' && this.run && this.phase === 'puzzle') return this.pauseMenu();
-    if (this.phase === 'puzzle' && this.pauses.size === 0) this.view?.onKey?.(e);
+    if (e.key === 'Escape' && this.overlay && this.screen !== 'won') {
+      this.closeOverlay();
+      return;
+    }
+    if (this.screen !== 'play' || this.overlay) return;
+    if ((e.key === 'z' && (e.ctrlKey || e.metaKey)) || e.key === 'u' || e.key === 'Backspace') {
+      e.preventDefault();
+      void this.undo();
+    } else if (e.key === 'r') this.restart();
+    else if (/^[1-9]$/.test(e.key)) this.tap(Number(e.key) - 1);
+    else if (e.key === '0') this.tap(9);
   }
 
-  /** Debug hooks for automated tests (not in the CrazyGames build). */
+  /** Test/debug hook (not exposed in the CrazyGames build). */
   debug() {
     return {
-      phase: () => this.phase,
-      solve: () => this.view?.solveNow(),
-      oxygen: () => this.run?.oxygen ?? 0,
-      setOxygen: (v: number) => {
-        if (this.run) this.run.oxygen = v;
-      },
-      darkNext: () => {
-        if (this.run) this.run.dark = true;
-      },
+      screen: () => this.screen,
+      level: () => this.play?.level.n ?? 0,
+      moves: () => this.play?.history.length ?? 0,
+      board: () => (this.play ? cloneBoard(this.play.board) : []),
+      /** moves that solve the current board from here (null if none found) */
+      solution: (): Move[] | null => (this.play ? solve(this.play.board) : null),
     };
   }
 }
+
+const sameMove = (a: Move | undefined, b: Move): boolean => !!a && a.from === b.from && a.to === b.to;

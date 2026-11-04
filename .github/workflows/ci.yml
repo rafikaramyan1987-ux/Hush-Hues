@@ -41,7 +41,7 @@ jobs:
       - name: Upload CrazyGames build (download = ready-to-upload zip)
         uses: actions/upload-artifact@v4
         with:
-          name: last-breath-crazygames
+          name: hush-hues-crazygames
           path: dist-crazygames/
           if-no-files-found: error
       - name: Upload Pages artifact

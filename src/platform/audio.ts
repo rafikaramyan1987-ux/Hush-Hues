@@ -1,13 +1,18 @@
 /**
- * All sounds are synthesised with WebAudio at runtime (no audio files, no copyrighted material).
+ * Soft sounds synthesised with WebAudio at runtime (no audio files).
  * The AudioContext is only created after the first user gesture.
+ * Each colour has its own note of a major pentatonic scale, so sorting sounds gently musical.
  */
+const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24, 26];
+const BASE = 392; // G4
+const noteFreq = (i: number): number => BASE * Math.pow(2, (PENTA[i % PENTA.length] ?? 0) / 12);
+
 class Audio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
-  private noise: AudioBuffer | null = null;
   private muted = false;
   private adMuted = false;
+  private static readonly VOLUME = 0.5;
 
   unlock(): void {
     if (this.ctx) {
@@ -19,12 +24,12 @@ class Audio {
       if (!AC) return;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : 0.6;
-      this.master.connect(this.ctx.destination);
-      const len = this.ctx.sampleRate * 1.5;
-      this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const data = this.noise.getChannelData(0);
-      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      this.master.gain.value = this.muted ? 0 : Audio.VOLUME;
+      // a gentle low-pass keeps every sound round and soft
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 3200;
+      this.master.connect(lp).connect(this.ctx.destination);
     } catch {
       this.ctx = null;
     }
@@ -33,10 +38,6 @@ class Audio {
   setMuted(m: boolean): void {
     this.muted = m;
     this.applyGain();
-  }
-
-  isMuted(): boolean {
-    return this.muted;
   }
 
   /** Mute everything while an ad plays (CrazyGames requirement). */
@@ -50,7 +51,7 @@ class Audio {
   }
 
   private applyGain(): void {
-    if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.muted || this.adMuted ? 0 : 0.6, this.ctx.currentTime, 0.02);
+    if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.muted || this.adMuted ? 0 : Audio.VOLUME, this.ctx.currentTime, 0.02);
   }
 
   private ready(): AudioContext | null {
@@ -58,7 +59,7 @@ class Audio {
     return this.ctx;
   }
 
-  private tone(freq: number, dur: number, type: OscillatorType = 'sine', vol = 0.2, delay = 0, slideTo?: number): void {
+  private tone(freq: number, dur: number, vol = 0.15, delay = 0, type: OscillatorType = 'sine', slideTo?: number): void {
     const ctx = this.ready();
     if (!ctx) return;
     const t = ctx.currentTime + delay;
@@ -66,64 +67,51 @@ class Audio {
     const g = ctx.createGain();
     o.type = type;
     o.frequency.setValueAtTime(freq, t);
-    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur * 0.8);
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     o.connect(g).connect(this.master!);
     o.start(t);
     o.stop(t + dur + 0.05);
   }
 
-  private noiseBurst(dur: number, freq: number, q: number, vol: number, attack = 0.01): void {
-    const ctx = this.ready();
-    if (!ctx || !this.noise) return;
-    const t = ctx.currentTime;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const f = ctx.createBiquadFilter();
-    f.type = 'bandpass';
-    f.frequency.value = freq;
-    f.Q.value = q;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    src.connect(f).connect(g).connect(this.master!);
-    src.start(t);
-    src.stop(t + dur + 0.05);
+  /** ball lifted out of a tube */
+  lift(color: number): void {
+    const f = noteFreq(color);
+    this.tone(f * 0.5, 0.18, 0.08, 0, 'sine', f * 0.75);
   }
-
-  click(): void {
-    this.tone(880, 0.05, 'triangle', 0.12);
+  /** ball lands in a tube */
+  drop(color: number): void {
+    const f = noteFreq(color);
+    this.tone(f, 0.35, 0.13, 0, 'sine');
+    this.tone(f * 2, 0.2, 0.03, 0.005, 'triangle');
   }
-  snap(): void {
-    this.tone(520, 0.06, 'square', 0.06);
-    this.tone(1040, 0.05, 'triangle', 0.08, 0.02);
+  /** move not allowed: a soft, low "boop", never harsh */
+  nope(): void {
+    this.tone(196, 0.16, 0.07, 0, 'sine', 170);
   }
-  success(): void {
-    [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.35, 'sine', 0.16, i * 0.08));
+  /** a tube just got sorted */
+  tubeDone(color: number): void {
+    const f = noteFreq(color);
+    [1, 1.25, 1.5].forEach((m, i) => this.tone(f * m, 0.6, 0.07, i * 0.06));
   }
-  fail(): void {
-    this.tone(220, 0.25, 'sawtooth', 0.08, 0, 110);
+  win(): void {
+    [0, 2, 4, 7, 9, 12].forEach((p, i) => this.tone(523 * Math.pow(2, p / 12), 0.9, 0.08, i * 0.09));
   }
-  alarm(): void {
-    this.tone(740, 0.18, 'square', 0.05);
-    this.tone(560, 0.18, 'square', 0.05, 0.2);
-  }
-  breath(): void {
-    this.noiseBurst(1.1, 700, 0.8, 0.07, 0.5);
-  }
-  hiss(): void {
-    this.noiseBurst(0.6, 3000, 0.7, 0.1);
-  }
-  boom(): void {
-    this.tone(90, 0.5, 'sine', 0.3, 0, 40);
-    this.noiseBurst(0.4, 300, 0.5, 0.15);
-  }
-  pop(): void {
-    this.tone(660, 0.08, 'sine', 0.15, 0, 1200);
+  tap(): void {
+    this.tone(660, 0.07, 0.05, 0, 'triangle');
   }
 }
 
 export const audio = new Audio();
+
+/** Optional, very short vibrations (ignored where unsupported). */
+export function vibrate(enabled: boolean, pattern: number | number[]): void {
+  if (!enabled) return;
+  try {
+    navigator.vibrate?.(pattern);
+  } catch {
+    /* not supported */
+  }
+}

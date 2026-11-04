@@ -1,20 +1,21 @@
 {
-  "name": "last-breath",
+  "name": "hush-hues",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
-  "description": "Last Breath - a mobile-first space survival puzzle game",
+  "description": "Hush Hues - a calm, mobile-first colour ball-sort puzzle",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "build:crazygames": "vite build --mode crazygames",
-    "zip:crazygames": "npm run build:crazygames && cd dist-crazygames && rm -f ../last-breath-crazygames.zip && zip -r -X ../last-breath-crazygames.zip .",
+    "zip:crazygames": "npm run build:crazygames && cd dist-crazygames && rm -f ../hush-hues-crazygames.zip && zip -r -X ../hush-hues-crazygames.zip .",
     "preview": "vite preview --port 4173 --strictPort",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "playwright test",
+    "icons": "node scripts/icons.mjs",
     "check": "npm run lint && npm run typecheck && npm run test"
   },
   "devDependencies": {
