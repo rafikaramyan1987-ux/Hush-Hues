@@ -4,6 +4,7 @@
 
 | Requirement | Implementation |
 |---|---|
+| One self-contained file | The `crazygames` build inlines JS + CSS into `index.html` (no `assets/`, no PWA manifest, no icons, no service worker). The only requests are the page and the SDK, so QA cannot report a missing resource. CI and an e2e test check it. |
 | SDK v3 loaded from CrazyGames' URL | Only in the `crazygames` build (`npm run build:crazygames`): Vite injects `<script src="https://sdk.crazygames.com/crazygames-sdk-v3.js">` in `<head>`. The GitHub Pages build has no external script. |
 | `await SDK.init()` before using the SDK | `src/platform/ads.ts` → `ads.init()` (with an 8 s timeout so a blocked SDK never blocks the game). |
 | Loading events | `game.loadingStart()` / `game.loadingStop()` around boot (`src/main.ts`). |
@@ -11,14 +12,16 @@
 | Rewarded ads, opt-in only | "Extra tube" (once per level, also offered on the "No moves left" panel) and "Undo" after the 3 free undos (+3 undos). Both show an ad badge. |
 | Midgame ads at natural breaks | Only when pressing "Next" between levels, never before level 3 is completed, at most one every 3 minutes (`src/core/adPolicy.ts`, unit-tested). |
 | Mute during ads | `adStarted` → AudioContext suspended and input blocked; resumed on `adFinished` / `adError`. |
-| happytime | Called when a level is sorted (if the SDK exposes it). |
+| happytime | Called when a level is sorted (if the SDK exposes it), just before `gameplayStop`. |
+| Progress saves | SDK data module (`data.getItem/setItem`) on CrazyGames, localStorage elsewhere; an older local save is copied over once. |
+| Global mute | `game.settings.muteAudio` + `addSettingsChangeListener`: the game is silent while the player has muted CrazyGames, on top of its own mute button. |
 | Works with ad blockers / no SDK | Every SDK call is wrapped; without SDK, rewarded ads resolve as "no SDK" and the reward is granted (GitHub Pages / testing). |
 | No external links, no own ads, no tracking, no other portal branding | None in the code (ESLint forbids `window.open`); no logos or links of other sites. |
 | Content rating | Abstract colour puzzle: no violence, chat, user content or purchases (well within PEGI 12). |
 | No console errors | Checked with Playwright (web build e2e and CrazyGames build). With an ad blocker the only console line is the browser's own "failed to load" for the blocked SDK script. |
 | Players land directly in gameplay | In the CrazyGames build every player starts straight on their current level (level 1 the first time); the menu is one tap away. |
 | Portrait game | Centered column; scales from 360 px to desktop. |
-| Size | ~280 kB in 8 files (limits: initial download ≤ 50 MB, ≤ 1500 files) — checked in CI. |
+| Size | one 145 kB file (limits: initial download ≤ 50 MB, ≤ 1500 files) — checked in CI. |
 | Relative paths | Vite `base: './'` so the zip works from any folder. |
 | Saves | localStorage wrapped in try/catch (game still works if storage is blocked). |
 

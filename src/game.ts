@@ -2,7 +2,7 @@ import { FREE_UNDOS, UNDOS_PER_AD } from './core/adPolicy';
 import { applyMove, canMove, cloneState, colorOf, hasAnyMove, isFrozen, isSolved, isTubeComplete, starsFor, type Move, type Puzzle, type State } from './core/board';
 import { getLevel } from './core/levelStore';
 import type { Level } from './core/levels';
-import { getBrowserStorage, load, recordWin, save, totalStars, type SaveData } from './core/save';
+import { load, recordWin, save, totalStars, type KV, type SaveData } from './core/save';
 import { kindOf, LEVEL_COUNT, type Mechanic } from './core/schedule';
 import { solve } from './core/solver';
 import { getLang, LANGS, setLang, t, type Key } from './i18n';
@@ -43,8 +43,7 @@ const INTRO_TEXT: Record<Mechanic, [Key, Key]> = {
 };
 
 export class Game {
-  private kv = getBrowserStorage();
-  data: SaveData = load(this.kv);
+  data: SaveData;
   screen: Screen = 'home';
   private play: PlayState | null = null;
   private view: BoardView | null = null;
@@ -57,10 +56,18 @@ export class Game {
   private hidden = false;
   private adPlaying = false;
 
-  constructor(private root: HTMLElement) {
+  constructor(
+    private root: HTMLElement,
+    private kv: KV | null,
+  ) {
+    this.data = load(kv);
     this.screenEl = root.querySelector('#screen')!;
     this.toastEl = root.querySelector('#toast')!;
     audio.setMuted(this.data.settings.muted);
+    ads.onPlatformMute((m) => {
+      audio.setPlatformMuted(m);
+      this.root.classList.toggle('platform-muted', m);
+    });
     this.applySymbols();
     ads.setHooks({
       onAdStart: () => {
@@ -129,6 +136,10 @@ export class Game {
     btn.addEventListener('click', () => {
       this.data.settings.muted = !this.data.settings.muted;
       audio.setMuted(this.data.settings.muted);
+    ads.onPlatformMute((m) => {
+      audio.setPlatformMuted(m);
+      this.root.classList.toggle('platform-muted', m);
+    });
       this.persist();
       paint();
       audio.tap();
@@ -614,8 +625,9 @@ export class Game {
     const stars = starsFor(p.moves.length, p.level.par);
     this.data = recordWin(this.data, p.level.n, stars);
     this.persist();
-    this.syncGameplay();
+    // celebrate while still in gameplay, then stop gameplay for the win panel
     ads.happytime();
+    this.syncGameplay();
     this.updateHud();
     this.view?.setHint(null);
     window.setTimeout(() => {

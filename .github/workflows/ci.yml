@@ -16,8 +16,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -42,6 +42,10 @@ jobs:
           npm run e2e
       - name: Build CrazyGames package
         run: npm run build:crazygames
+      - name: CrazyGames package is one self-contained file (no asset that can go missing)
+        run: |
+          test "$(find dist-crazygames -type f)" = "dist-crazygames/index.html"
+          ! grep -qE 'crossorigin|rel="manifest"|src="\./assets|href="\./' dist-crazygames/index.html
       - name: CrazyGames package limits (< 50 MB, < 1500 files)
         run: |
           size=$(du -sb dist-crazygames | cut -f1)
@@ -50,14 +54,14 @@ jobs:
           test "$size" -lt 50000000
           test "$files" -lt 1500
       - name: Upload CrazyGames build (download = ready-to-upload zip)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hush-hues-crazygames
           path: dist-crazygames/
           if-no-files-found: error
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: dist/
 
@@ -73,4 +77,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

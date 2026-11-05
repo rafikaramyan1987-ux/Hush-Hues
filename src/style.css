@@ -480,6 +480,8 @@ svg { display: block; }
 .cover-mode { max-width: none !important; }
 .cover-mode::before, .cover-mode::after { animation: none !important; }
 .cover { align-items: center; justify-content: center; gap: 2vh; padding: 4vh 6vw; }
+/* CrazyGames puts a NEW/HOT label over the top-left corner (~25% × 20%): keep the title below that band */
+.cover-title { margin-top: 21vh !important; }
 .cover-title {
   margin: 0;
   font-size: min(16vh, 13vw);

@@ -12,6 +12,8 @@ class Audio {
   private master: GainNode | null = null;
   private muted = false;
   private adMuted = false;
+  /** global mute of the platform (CrazyGames setting), on top of the game's own mute button */
+  private platformMuted = false;
   private static readonly VOLUME = 0.5;
 
   unlock(): void {
@@ -24,7 +26,7 @@ class Audio {
       if (!AC) return;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : Audio.VOLUME;
+      this.master.gain.value = this.muted || this.platformMuted ? 0 : Audio.VOLUME;
       // a gentle low-pass keeps every sound round and soft
       const lp = this.ctx.createBiquadFilter();
       lp.type = 'lowpass';
@@ -40,6 +42,11 @@ class Audio {
     this.applyGain();
   }
 
+  setPlatformMuted(m: boolean): void {
+    this.platformMuted = m;
+    this.applyGain();
+  }
+
   /** Mute everything while an ad plays (CrazyGames requirement). */
   setAdMuted(m: boolean): void {
     this.adMuted = m;
@@ -51,11 +58,11 @@ class Audio {
   }
 
   private applyGain(): void {
-    if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.muted || this.adMuted ? 0 : Audio.VOLUME, this.ctx.currentTime, 0.02);
+    if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.muted || this.adMuted || this.platformMuted ? 0 : Audio.VOLUME, this.ctx.currentTime, 0.02);
   }
 
   private ready(): AudioContext | null {
-    if (!this.ctx || !this.master || this.muted || this.adMuted || this.ctx.state !== 'running') return null;
+    if (!this.ctx || !this.master || this.muted || this.adMuted || this.platformMuted || this.ctx.state !== 'running') return null;
     return this.ctx;
   }
 
