@@ -2,8 +2,10 @@
  * Tiny adapter around the CrazyGames HTML5 SDK v3.
  * Outside CrazyGames (GitHub Pages, local dev) every call is a safe no-op;
  * rewarded ads resolve as "nosdk" so the game can grant the reward for testing.
+ * Also exposes the SDK data module (progress saves) and the platform's global mute setting.
  */
 import { midgameAllowed } from '../core/adPolicy';
+import type { KV } from '../core/save';
 
 interface CGAdCallbacks {
   adStarted?: () => void;
@@ -21,6 +23,15 @@ interface CGSDK {
     loadingStart(): void;
     loadingStop(): void;
     happytime?(): void;
+    /** platform settings; muteAudio = the player muted games globally on CrazyGames */
+    settings?: { muteAudio?: boolean };
+    addSettingsChangeListener?(listener: (settings: { muteAudio?: boolean }) => void): void;
+  };
+  /** data module: same API as localStorage, synced with the player's CrazyGames account */
+  data?: {
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): void;
+    removeItem?(key: string): void;
   };
 }
 
@@ -93,6 +104,36 @@ class Ads {
     if (active === this.playing) return;
     this.playing = active;
     this.safe((s) => (active ? s.game.gameplayStart() : s.game.gameplayStop()));
+  }
+
+  /** SDK data module as a key-value store, or null outside CrazyGames. Never throws. */
+  get storage(): KV | null {
+    const data = this.sdk?.data;
+    if (!data) return null;
+    return {
+      getItem: (k) => {
+        try {
+          return data.getItem(k);
+        } catch {
+          return null;
+        }
+      },
+      setItem: (k, v) => {
+        try {
+          data.setItem(k, v);
+        } catch {
+          /* the save is simply skipped */
+        }
+      },
+    };
+  }
+
+  /** Calls back now and on every change with the platform's global mute setting (CrazyGames only). */
+  onPlatformMute(cb: (muted: boolean) => void): void {
+    this.safe((s) => {
+      cb(s.game.settings?.muteAudio === true);
+      s.game.addSettingsChangeListener?.((settings) => cb(settings?.muteAudio === true));
+    });
   }
 
   happytime(): void {

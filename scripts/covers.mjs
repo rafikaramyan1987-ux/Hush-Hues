@@ -17,6 +17,16 @@ for (const [name, width, height] of sizes) {
   await page.goto(`${BASE}?cover`);
   await page.getByTestId('cover').waitFor();
   await page.waitForTimeout(600); // let the lifted ball settle
+  // the platform's NEW/HOT label covers the top-left ~25% × 20%: the title must stay clear of it
+  const t = await page.locator('.cover-title').evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const r = range.getBoundingClientRect(); // the glyphs, not the full-width block
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+  });
+  const overlaps = t.left < width * 0.25 && t.top < height * 0.2;
+  console.log(`${name}: title ${Math.round(t.left)},${Math.round(t.top)} → ${Math.round(t.right)},${Math.round(t.bottom)}${overlaps ? '  OVERLAPS LABEL ZONE' : ''}`);
+  if (overlaps) process.exitCode = 1;
   await page.screenshot({ path: `submission/covers/${name}.png` });
   await page.close();
 }

@@ -1,13 +1,16 @@
 import './style.css';
 import { Game } from './game';
 import { detectLang, setLang } from './i18n';
-import { getBrowserStorage, load } from './core/save';
+import { getBrowserStorage, load, pickStorage } from './core/save';
 import { ads } from './platform/ads';
 import { renderCover } from './ui/cover';
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app')!;
-  setLang(detectLang(load(getBrowserStorage()).settings.lang));
+  await ads.init();
+  // progress: CrazyGames data module on CrazyGames, localStorage everywhere else
+  const kv = pickStorage(ads.storage, getBrowserStorage());
+  setLang(detectLang(load(kv).settings.lang));
   // store art / video tooling only (never in the CrazyGames build)
   if (__TARGET__ !== 'crazygames' && new URLSearchParams(location.search).has('cover')) {
     document.getElementById('boot')?.remove();
@@ -15,16 +18,15 @@ async function boot(): Promise<void> {
     (window as unknown as { __cover: unknown }).__cover = {
       play: (n: number) => {
         root.classList.remove('cover-mode');
-        const game = new Game(root);
+        const game = new Game(root, kv);
         (window as unknown as { __hh: unknown }).__hh = game.debug();
         game.startLevel(n);
       },
     };
     return;
   }
-  await ads.init();
   ads.loadingStart();
-  const game = new Game(root);
+  const game = new Game(root, kv);
   if (__TARGET__ !== 'crazygames') {
     (window as unknown as { __hh: unknown }).__hh = game.debug();
   }

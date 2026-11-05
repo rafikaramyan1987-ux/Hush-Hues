@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { midgameAllowed, MIDGAME_COOLDOWN_MS } from '../src/core/adPolicy';
 import { applyMove, canMove, FROZEN, hasAnyMove, HELPER_CAP, isFrozen, isSolved, neighbours, perRowFor, starsFor, type Puzzle, type State } from '../src/core/board';
 import { createRng, hashString } from '../src/core/rng';
-import { defaultSave, load, recordWin, sanitize, save, SAVE_KEY, totalStars, type KV } from '../src/core/save';
+import { defaultSave, load, pickStorage, recordWin, sanitize, save, SAVE_KEY, totalStars, type KV } from '../src/core/save';
 import { kindOf } from '../src/core/schedule';
 
 const plain = (balls: number[][], cap = 4): { p: Puzzle; s: State } => ({
@@ -136,6 +136,18 @@ describe('save', () => {
     d = recordWin(d, 2, 3);
     expect(d.stars).toEqual([2, 3]);
     expect(d.unlocked).toBe(3);
+  });
+
+  it('uses the CrazyGames data module when present, copying an older local save once', () => {
+    const platform = mem();
+    const browser = mem();
+    expect(pickStorage(null, browser)).toBe(browser);
+    browser.m.set(SAVE_KEY, '{"unlocked":7}');
+    expect(pickStorage(platform, browser)).toBe(platform);
+    expect(platform.m.get(SAVE_KEY)).toBe('{"unlocked":7}');
+    browser.m.set(SAVE_KEY, '{"unlocked":2}');
+    pickStorage(platform, browser); // the platform save wins once it exists
+    expect(platform.m.get(SAVE_KEY)).toBe('{"unlocked":7}');
   });
 
   it('hard levels count their stars twice', () => {
