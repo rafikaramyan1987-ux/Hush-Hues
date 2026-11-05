@@ -1,6 +1,6 @@
 import { applyMove, canMove, cloneState, FROZEN, HELPER_CAP, isSolved, perRowFor, type Move, type Puzzle, type State, type TubeDef } from './board';
 import { createRng, type Rng } from './rng';
-import { bandOf, configFor, LEVEL_COUNT, type Kind, type LevelConfig, type Mechanic } from './schedule';
+import { bandOf, configFor, INTRO_LEVEL, LEVEL_COUNT, type Kind, type LevelConfig, type Mechanic } from './schedule';
 import { solveFull } from './solver';
 
 export { LEVEL_COUNT };
@@ -54,7 +54,9 @@ function scrambleRange(cfg: LevelConfig): [number, number] {
   return [Math.max(0.3, base - 0.2), Math.min(1, base + 0.35)];
 }
 
-interface Candidate {
+export interface Candidate {
+  /** mechanics of the config the board was drawn for */
+  mechanics: Mechanic[];
   puzzle: Puzzle;
   start: State;
   hidden: boolean[][];
@@ -137,6 +139,7 @@ export function drawCandidate(cfg: LevelConfig, rng: Rng, frac: number, depth = 
 
   const hiddenCount = hidden.reduce((a, t) => a + t.filter(Boolean).length, 0);
   return {
+    mechanics: cfg.mechanics,
     puzzle,
     start,
     hidden,
@@ -185,7 +188,7 @@ const toLevel = (cfg: LevelConfig, c: Candidate): Level => ({
   n: cfg.n,
   kind: cfg.kind,
   colors: cfg.colors,
-  mechanics: cfg.mechanics,
+  mechanics: c.mechanics,
   intro: cfg.intro,
   puzzle: c.puzzle,
   start: c.start,
@@ -213,13 +216,18 @@ function poolFor(cfg: LevelConfig): Candidate[] {
 const easiest = (c: Candidate[]) => c.reduce((a, b) => (b.difficulty < a.difficulty ? b : a));
 const hardest = (c: Candidate[]) => c.reduce((a, b) => (b.difficulty > a.difficulty ? b : a));
 
+/** A board may be used for level n only if all its mechanics were introduced before n. */
+const allowedAt = (c: Candidate, n: number): boolean => c.mechanics.every((m) => INTRO_LEVEL[m] < n);
+
 /**
- * Picks one board per level of a colour band (dynamic programming over the candidate pools):
- * - normal levels follow the target curve, never easier than the previous normal level of the band
- *   and never more than MAX_STEP harder (no spikes);
- * - a normal level just before a "hard" level stays below that level's hardest board,
- *   and one just before a "relax" level stays above that level's easiest board.
- * Hard levels then take their hardest board, relax and intro levels their easiest.
+ * Picks one board per level of a colour band.
+ * - Hard levels take the hardest board of their own pool; relax and intro levels the easiest of theirs.
+ * - Normal levels share the boards drawn for all normal levels of the band (same colours), so the curve
+ *   is not at the mercy of one level's mix of mechanics. Dynamic programming over those boards sorted by
+ *   difficulty picks a strictly increasing subsequence (no board used twice, never easier than the previous
+ *   normal level, never more than MAX_STEP harder), closest to the target curve, using only boards whose
+ *   mechanics are already introduced, and keeping each level just before a hard one below it (and just
+ *   before a relax one above it).
  */
 function chooseBand(cfgs: LevelConfig[], pools: Candidate[][]): Candidate[] {
   const picks: Candidate[] = new Array(cfgs.length);
@@ -234,68 +242,89 @@ function chooseBand(cfgs: LevelConfig[], pools: Candidate[][]): Candidate[] {
   });
   if (!curve.length) return picks;
 
+  // all boards drawn for the band's normal levels, easiest first (ties: shorter solution first)
+  const shared = curve.flatMap((i) => pools[i]!).sort((a, b) => a.difficulty - b.difficulty || a.solution.length - b.solution.length);
   const BAD = 1000; // a broken rule costs far more than any distance to the target
   const local = (i: number, c: Candidate): number => {
-    let cost = Math.abs(c.difficulty - targetDifficulty(cfgs[i]!));
+    const cfg = cfgs[i]!;
+    if (!allowedAt(c, cfg.n)) return Infinity;
+    let cost = Math.abs(c.difficulty - targetDifficulty(cfg));
     const next = cfgs[i + 1];
-    if (next && next.kind === 'hard' && c.difficulty >= hardest(pools[i + 1]!).difficulty) cost += BAD;
-    if (next && next.kind === 'relax' && next.n > TUTORIAL_PAR.length && c.difficulty <= easiest(pools[i + 1]!).difficulty) cost += BAD;
+    if (next && next.kind === 'hard' && c.difficulty >= picks[i + 1]!.difficulty) cost += BAD;
+    if (next && next.kind === 'relax' && next.n > TUTORIAL_PAR.length && c.difficulty <= picks[i + 1]!.difficulty) cost += BAD;
     return cost;
   };
-  const step = (a: Candidate, b: Candidate): number => (b.difficulty < a.difficulty || b.difficulty - a.difficulty > MAX_STEP ? BAD : 0);
 
-  // best[k][j]: lowest cost of the curve levels up to curve[k] with candidate j picked for curve[k]
-  const best: number[][] = [];
-  const from: number[][] = [];
+  // best[k][j]: lowest cost for curve levels 0..k with shared[j] used for level curve[k]
+  const N = shared.length;
+  const best: Float64Array[] = [];
+  const from: Int32Array[] = [];
   curve.forEach((i, k) => {
-    const pool = pools[i]!;
-    best.push(pool.map(() => Infinity));
-    from.push(pool.map(() => -1));
-    pool.forEach((c, j) => {
+    const b = new Float64Array(N).fill(Infinity);
+    const f = new Int32Array(N).fill(-1);
+    for (let j = 0; j < N; j++) {
+      const c = shared[j]!;
+      const lc = local(i, c);
+      if (lc === Infinity) continue;
       if (k === 0) {
-        best[0]![j] = local(i, c);
-        return;
+        b[j] = lc;
+        continue;
       }
-      const prevPool = pools[curve[k - 1]!]!;
-      prevPool.forEach((pc, pj) => {
-        const v = best[k - 1]![pj]! + step(pc, c) + local(i, c);
-        if (v < best[k]![j]!) {
-          best[k]![j] = v;
-          from[k]![j] = pj;
+      const prev = best[k - 1]!;
+      for (let pj = 0; pj < j; pj++) {
+        if (prev[pj] === Infinity) continue;
+        const d = c.difficulty - shared[pj]!.difficulty;
+        const v = prev[pj]! + (d > MAX_STEP ? BAD : 0) + lc;
+        if (v < b[j]!) {
+          b[j] = v;
+          f[j] = pj;
         }
-      });
-    });
+      }
+    }
+    best.push(b);
+    from.push(f);
   });
-  let j = best[curve.length - 1]!.reduce((bi, v, x, arr) => (v < arr[bi]! ? x : bi), 0);
+  const last = best[curve.length - 1]!;
+  let j = 0;
+  for (let x = 1; x < N; x++) if (last[x]! < last[j]!) j = x;
+  if (last[j] === Infinity) throw new Error(`no board sequence for band starting at level ${cfgs[0]!.n}`);
   for (let k = curve.length - 1; k >= 0; k--) {
-    picks[curve[k]!] = pools[curve[k]!]![j]!;
+    picks[curve[k]!] = shared[j]!;
     j = from[k]![j]!;
   }
   return picks;
 }
 
-/**
- * Builds levels 1..count deterministically: every board comes from the level's own seed, and the choice
- * among a level's candidates only looks at its own colour band (see chooseBand).
- */
-export function generateLevels(count: number, onLevel?: (l: Level) => void): Level[] {
+/** Candidate pools for levels 1..count (the slow part: every board is solved and measured). */
+export function generatePools(count: number, onLevel?: (n: number) => void): Candidate[][] {
+  const pools: Candidate[][] = [];
+  for (let n = 1; n <= count; n++) {
+    const pool = poolFor(configFor(n));
+    if (!pool.length) throw new Error(`could not generate level ${n}`);
+    pools.push(pool);
+    onLevel?.(n);
+  }
+  return pools;
+}
+
+/** Chooses the boards of levels 1..pools.length, band by band (see chooseBand). */
+export function selectLevels(pools: Candidate[][]): Level[] {
   const out: Level[] = [];
   let n = 1;
-  while (n <= count) {
-    const { last } = bandOf(n);
+  while (n <= pools.length) {
+    const last = Math.min(bandOf(n).last, pools.length);
     const cfgs: LevelConfig[] = [];
-    for (let m = n; m <= Math.min(last, count); m++) cfgs.push(configFor(m));
-    const pools = cfgs.map((cfg) => {
-      const pool = poolFor(cfg);
-      if (!pool.length) throw new Error(`could not generate level ${cfg.n}`);
-      return pool;
-    });
-    chooseBand(cfgs, pools).forEach((c, i) => {
-      const level = toLevel(cfgs[i]!, c);
-      out.push(level);
-      onLevel?.(level);
-    });
-    n = Math.min(last, count) + 1;
+    for (let m = n; m <= last; m++) cfgs.push(configFor(m));
+    chooseBand(cfgs, pools.slice(n - 1, last)).forEach((c, i) => out.push(toLevel(cfgs[i]!, c)));
+    n = last + 1;
   }
   return out;
+}
+
+/**
+ * Builds levels 1..count deterministically: every board comes from a level's own seed, and the choice
+ * among boards only looks at their colour band.
+ */
+export function generateLevels(count: number): Level[] {
+  return selectLevels(generatePools(count));
 }
