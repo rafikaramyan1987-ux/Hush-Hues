@@ -39,6 +39,8 @@ export function difficultyScore(nodes: number, deadEndRatio: number, hiddenCount
 
 /** Normal levels may rise at most this much above the previous normal level of their band (no spikes). */
 export const MAX_STEP = 2.5;
+/** Hard levels stay within this much of the target curve. */
+export const HARD_BONUS = 3.5;
 
 /** Target difficulty of a normal level: rises steadily through each colour band and from band to band. */
 export function targetDifficulty(cfg: LevelConfig): number {
@@ -221,7 +223,7 @@ const allowedAt = (c: Candidate, n: number): boolean => c.mechanics.every((m) =>
 
 /**
  * Picks one board per level of a colour band.
- * - Hard levels take the hardest board of their own pool; relax and intro levels the easiest of theirs.
+ * - Hard levels take the hardest board of their own pool within HARD_BONUS of the curve; relax and intro levels the easiest of theirs.
  * - Normal levels share the boards drawn for all normal levels of the band (same colours), so the curve
  *   is not at the mercy of one level's mix of mechanics. Dynamic programming over those boards sorted by
  *   difficulty picks a strictly increasing subsequence (no board used twice, never easier than the previous
@@ -236,8 +238,11 @@ function chooseBand(cfgs: LevelConfig[], pools: Candidate[][]): Candidate[] {
     if (cfg.n <= TUTORIAL_PAR.length) {
       const want = TUTORIAL_PAR[cfg.n - 1]!;
       picks[i] = pools[i]!.reduce((a, b) => (Math.abs(b.solution.length - want) < Math.abs(a.solution.length - want) ? b : a));
-    } else if (cfg.kind === 'hard') picks[i] = hardest(pools[i]!);
-    else if (cfg.kind === 'relax' || cfg.intro) picks[i] = easiest(pools[i]!);
+    } else if (cfg.kind === 'hard') {
+      // clearly harder than the curve, but capped: a challenge, not a wall
+      const capped = pools[i]!.filter((c) => c.difficulty <= targetDifficulty(cfg) + HARD_BONUS);
+      picks[i] = capped.length ? hardest(capped) : easiest(pools[i]!);
+    } else if (cfg.kind === 'relax' || cfg.intro) picks[i] = easiest(pools[i]!);
     else curve.push(i);
   });
   if (!curve.length) return picks;
