@@ -99,6 +99,20 @@ class Audio {
   win(): void {
     [0, 2, 4, 7, 9, 12].forEach((p, i) => this.tone(523 * Math.pow(2, p / 12), 0.9, 0.08, i * 0.09));
   }
+  /** a "?" ball shows its colour */
+  reveal(): void {
+    this.tone(880, 0.25, 0.05, 0, 'sine', 1320);
+  }
+  /** ice cracks */
+  thaw(): void {
+    this.tone(1568, 0.12, 0.04, 0, 'triangle');
+    this.tone(1175, 0.18, 0.04, 0.05, 'triangle');
+  }
+  /** a locked tube opens */
+  opened(): void {
+    this.tone(659, 0.3, 0.07, 0, 'sine');
+    this.tone(988, 0.45, 0.07, 0.1, 'sine');
+  }
   tap(): void {
     this.tone(660, 0.07, 0.05, 0, 'triangle');
   }

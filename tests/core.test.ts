@@ -1,36 +1,78 @@
 import { describe, expect, it } from 'vitest';
 import { midgameAllowed, MIDGAME_COOLDOWN_MS } from '../src/core/adPolicy';
-import { applyMove, canMove, isSolved, starsFor, undoMove, type Board } from '../src/core/board';
+import { applyMove, canMove, FROZEN, hasAnyMove, HELPER_CAP, isFrozen, isSolved, neighbours, perRowFor, starsFor, type Puzzle, type State } from '../src/core/board';
 import { createRng, hashString } from '../src/core/rng';
-import { defaultSave, load, recordWin, sanitize, save, SAVE_KEY, type KV } from '../src/core/save';
+import { defaultSave, load, recordWin, sanitize, save, SAVE_KEY, totalStars, type KV } from '../src/core/save';
+import { kindOf } from '../src/core/schedule';
+
+const plain = (balls: number[][], cap = 4): { p: Puzzle; s: State } => ({
+  p: { tubes: balls.map(() => ({ cap, lock: null })), perColor: cap, perRow: perRowFor(balls.length) },
+  s: { balls: balls.map((t) => t.slice()), locked: balls.map(() => false) },
+});
 
 describe('board rules', () => {
-  const b = (): Board => [[0, 1], [1], [], [0, 0, 0, 1]];
-
   it('allows a drop on an empty tube or on the same colour with space', () => {
-    expect(canMove(b(), 0, 1)).toBe(true); // 1 on 1
-    expect(canMove(b(), 0, 2)).toBe(true); // empty
-    expect(canMove(b(), 1, 0)).toBe(true); // 1 on 1
-    expect(canMove(b(), 0, 3)).toBe(false); // full
-    expect(canMove(b(), 2, 0)).toBe(false); // empty source
-    expect(canMove(b(), 0, 0)).toBe(false);
-    expect(canMove([[0], [1]], 0, 1)).toBe(false); // other colour
+    const { p, s } = plain([[0, 1], [1], [], [0, 0, 0, 1]]);
+    expect(canMove(p, s, 0, 1)).toBe(true); // 1 on 1
+    expect(canMove(p, s, 0, 2)).toBe(true); // empty
+    expect(canMove(p, s, 1, 0)).toBe(true); // 1 on 1
+    expect(canMove(p, s, 0, 3)).toBe(false); // full
+    expect(canMove(p, s, 2, 0)).toBe(false); // empty source
+    expect(canMove(p, s, 0, 0)).toBe(false);
+    const o = plain([[0], [1]]);
+    expect(canMove(o.p, o.s, 0, 1)).toBe(false); // other colour
   });
 
-  it('applies and undoes moves', () => {
-    const x = b();
-    expect(applyMove(x, { from: 0, to: 1 })).toBe(true);
-    expect(x).toEqual([[0], [1, 1], [], [0, 0, 0, 1]]);
-    undoMove(x, { from: 0, to: 1 });
-    expect(x).toEqual(b());
-    expect(applyMove(x, { from: 0, to: 3 })).toBe(false);
-    expect(x).toEqual(b());
+  it('applies moves and detects the win', () => {
+    const { p, s } = plain([[0, 1], [1], []]);
+    expect(applyMove(p, s, { from: 0, to: 1 })).not.toBeNull();
+    expect(s.balls).toEqual([[0], [1, 1], []]);
+    expect(applyMove(p, s, { from: 2, to: 0 })).toBeNull();
+    const w = plain([[0, 0, 0, 0], [], [1, 1, 1, 1]]);
+    expect(isSolved(w.p, w.s)).toBe(true);
+    const nw = plain([[0, 0, 0], [0], [1, 1, 1, 1]]);
+    expect(isSolved(nw.p, nw.s)).toBe(false);
   });
 
-  it('detects the win', () => {
-    expect(isSolved([[0, 0, 0, 0], [], [1, 1, 1, 1]])).toBe(true);
-    expect(isSolved([[0, 0, 0], [0], [1, 1, 1, 1]])).toBe(false);
-    expect(isSolved([[0, 0, 0, 1], [1, 1, 1, 0]])).toBe(false);
+  it('helper tubes hold 2 balls and must end empty', () => {
+    const { p, s } = plain([[0, 0, 0, 1], [1, 1, 1], []]);
+    p.tubes[2] = { cap: HELPER_CAP, lock: null };
+    expect(applyMove(p, s, { from: 0, to: 2 })).not.toBeNull();
+    s.balls[2]!.push(1);
+    expect(canMove(p, s, 1, 2)).toBe(false); // full at 2
+    const done = plain([[0, 0, 0, 0], [1, 1]]);
+    done.p.tubes[1] = { cap: HELPER_CAP, lock: null };
+    expect(isSolved(done.p, done.s)).toBe(false);
+  });
+
+  it('a locked tube opens when its colour is completed', () => {
+    const { p, s } = plain([[0, 0, 0], [0, 1], [1, 1, 1], []]);
+    p.tubes[2] = { cap: 4, lock: 0 };
+    s.locked[2] = true;
+    expect(canMove(p, s, 1, 2)).toBe(false); // can't drop into a locked tube
+    expect(canMove(p, s, 2, 3)).toBe(false); // nor take from it
+    const fx = applyMove(p, s, { from: 1, to: 3 })!; // 1 aside
+    expect(fx.unlocked).toEqual([]);
+    expect(applyMove(p, s, { from: 1, to: 0 })!.unlocked).toEqual([2]);
+    expect(s.locked[2]).toBe(false);
+  });
+
+  it('a frozen ball thaws after a move in a neighbouring tube of the same row', () => {
+    // 6 tubes → 3 per row: tubes 0,1,2 / 3,4,5
+    const { p, s } = plain([[1, 0 | FROZEN], [0], [], [1, 1, 1], [], []]);
+    expect(p.perRow).toBe(3);
+    expect(neighbours(3, 6, 2)).toEqual([1]);
+    expect(canMove(p, s, 0, 2)).toBe(false); // frozen on top
+    applyMove(p, s, { from: 3, to: 4 }); // other row: no effect
+    expect(isFrozen(s.balls[0]![1]!)).toBe(true);
+    const fx = applyMove(p, s, { from: 1, to: 2 })!; // tube 1 is next to tube 0
+    expect(fx.thawed).toContain(0);
+    expect(canMove(p, s, 0, 2)).toBe(true);
+  });
+
+  it('knows when no move is left', () => {
+    const { p, s } = plain([[0, 1, 0, 1], [1, 0, 1, 0]]);
+    expect(hasAnyMove(p, s)).toBe(false);
   });
 
   it('gives 1-3 stars by moves', () => {
@@ -67,6 +109,7 @@ describe('save', () => {
       unlocked: 1,
       stars: [3, 0, 2],
       settings: { muted: false, vibration: true, symbols: false },
+      seenIntros: [],
     });
   });
 
@@ -93,6 +136,12 @@ describe('save', () => {
     d = recordWin(d, 2, 3);
     expect(d.stars).toEqual([2, 3]);
     expect(d.unlocked).toBe(3);
+  });
+
+  it('hard levels count their stars twice', () => {
+    let d = recordWin(defaultSave(), 9, 3);
+    d = recordWin(d, 10, 3);
+    expect(totalStars(d, kindOf)).toBe(9);
   });
 });
 
