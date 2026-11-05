@@ -1,20 +1,25 @@
-import { CAPACITY, type Board } from '../core/board';
+import { colorOf, isFrozen, type Puzzle, type State } from '../core/board';
 import { h, reducedMotion } from './dom';
+import { LOCK_SVG } from './icons';
 import { COLORS, SYMBOLS } from './palette';
 
 interface Geo {
   d: number;
   tubeW: number;
-  tubeH: number;
   x: number[];
   y: number[];
+  hgt: number[];
+  liftY: number[];
 }
 
 interface BallEl extends HTMLDivElement {
   _anim?: Animation;
   _x?: number;
   _y?: number;
+  _hidden?: boolean;
 }
+
+const tubeHeight = (d: number, cap: number) => Math.round(d * (cap * 1.06 + 0.45));
 
 /**
  * DOM board: tubes are buttons, balls are absolutely positioned divs living in board coordinates,
@@ -25,9 +30,15 @@ export class BoardView {
   readonly el: HTMLDivElement;
   private tubes: HTMLButtonElement[] = [];
   private balls: BallEl[][] = [];
+  private caps: number[] = [];
+  private perColor = 4;
+  private perRow = 5;
   private geo: Geo | null = null;
   private lifted: number | null = null;
   private ro: ResizeObserver | null = null;
+
+  /** largest ball size in px (the cover scene draws bigger balls than the game) */
+  maxBall = 62;
 
   constructor(private onTap: (tube: number) => void) {
     this.el = h('div', { class: 'board', 'data-testid': 'board' });
@@ -48,22 +59,27 @@ export class BoardView {
     this.ro?.disconnect();
   }
 
-  setBoard(board: Board): void {
+  /** Full render. `hidden[t][k]` marks balls that still show "?". */
+  setBoard(p: Puzzle, s: State, hidden: boolean[][]): void {
     this.el.textContent = '';
     this.tubes = [];
     this.balls = [];
+    this.caps = [];
     this.lifted = null;
-    board.forEach((t) => {
-      this.addTubeEl();
-      for (const c of t) this.balls[this.balls.length - 1]!.push(this.makeBall(c));
+    this.perColor = p.perColor;
+    this.perRow = p.perRow;
+    p.tubes.forEach((def, i) => {
+      this.addTubeEl(def.cap, def.lock);
+      s.balls[i]!.forEach((b, k) => this.balls[i]!.push(this.makeBall(b, !!hidden[i]?.[k])));
     });
+    this.applyStatus(s, false);
     this.layout(false);
   }
 
-  private addTubeEl(): void {
+  private addTubeEl(cap: number, lock: number | null): void {
     const i = this.tubes.length;
     const btn = h('button', {
-      class: 'tube',
+      class: `tube${cap < this.perColor ? ' helper' : ''}`,
       type: 'button',
       'data-testid': `tube-${i}`,
       'aria-label': `${i + 1}`,
@@ -75,74 +91,125 @@ export class BoardView {
         }
       },
     });
+    if (lock !== null) {
+      const badge = h('span', { class: 'lock', 'aria-hidden': 'true' });
+      badge.style.setProperty('--c', COLORS[lock % COLORS.length]!);
+      badge.innerHTML =
+        LOCK_SVG +
+        `<span class="key"><svg class="sym" viewBox="0 0 24 24">${SYMBOLS[lock % SYMBOLS.length]}</svg></span>`;
+      btn.append(badge);
+    }
     this.tubes.push(btn);
     this.balls.push([]);
+    this.caps.push(cap);
     this.el.append(btn);
   }
 
-  private makeBall(color: number): BallEl {
+  private makeBall(value: number, hidden: boolean): BallEl {
+    const color = colorOf(value);
     const b = h('div', { class: 'ball', 'data-color': color }) as BallEl;
     b.style.setProperty('--c', COLORS[color % COLORS.length]!);
-    b.innerHTML = `<svg class="sym" viewBox="0 0 24 24" aria-hidden="true">${SYMBOLS[color % SYMBOLS.length]}</svg>`;
+    b.innerHTML = `<svg class="sym" viewBox="0 0 24 24" aria-hidden="true">${SYMBOLS[color % SYMBOLS.length]}</svg><span class="q" aria-hidden="true">?</span>`;
+    b._hidden = hidden;
+    b.classList.toggle('hidden', hidden);
     this.el.append(b);
     return b;
   }
 
-  addTube(): void {
-    this.addTubeEl();
-    const t = this.tubes[this.tubes.length - 1]!;
-    t.classList.add('appear');
+  addTube(cap: number): void {
+    this.addTubeEl(cap, null);
+    this.tubes[this.tubes.length - 1]!.classList.add('appear');
     this.layout(true);
   }
 
-  /** Compute the best grid (1–3 rows) for the available space and place everything. */
+  /** Frozen balls and locks, read from the state (after a move, an undo, a restart). */
+  applyStatus(s: State, animate = true): void {
+    this.balls.forEach((stack, t) =>
+      stack.forEach((b, k) => {
+        const frozen = isFrozen(s.balls[t]?.[k] ?? 0);
+        if (b.classList.contains('frozen') && !frozen && animate) this.pulse(b, 'thaw');
+        b.classList.toggle('frozen', frozen);
+      }),
+    );
+    this.tubes.forEach((t, i) => {
+      const locked = !!s.locked[i];
+      if (t.classList.contains('locked') && !locked && animate) this.pulse(t, 'unlock');
+      t.classList.toggle('locked', locked);
+    });
+  }
+
+  /** Every ball that is on top shows its colour from now on. Returns true if one was revealed. */
+  revealTops(): boolean {
+    let any = false;
+    for (const stack of this.balls) {
+      const b = stack[stack.length - 1];
+      if (b && b._hidden) {
+        b._hidden = false;
+        b.classList.remove('hidden');
+        this.pulse(b, 'reveal');
+        any = true;
+      }
+    }
+    return any;
+  }
+
+  private pulse(el: HTMLElement, cls: string): void {
+    if (reducedMotion()) return;
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    window.setTimeout(() => el.classList.remove(cls), 700);
+  }
+
+  /** Place tubes in fixed rows (perRow comes from the level) and size everything to the space available. */
   layout(animate: boolean): void {
     const W = this.el.clientWidth;
     const H = this.el.clientHeight;
     const n = this.tubes.length;
     if (!W || !H || !n) return;
-    let best: { rows: number; d: number } = { rows: 1, d: 0 };
-    for (let rows = 1; rows <= 3; rows++) {
-      const perRow = Math.ceil(n / rows);
-      const byW = W / perRow / 1.42;
-      const byH = H / rows / (CAPACITY * 1.06 + 0.45 + 1.25);
-      const d = Math.min(byW, byH, 62);
-      if (d > best.d + 0.5) best = { rows, d };
-    }
-    const { rows } = best;
-    const d = Math.floor(best.d);
+    const perRow = Math.max(1, Math.min(this.perRow, n));
+    const rows = Math.ceil(n / perRow);
+    const cap = this.perColor;
+    const byW = W / perRow / 1.42;
+    const byH = H / rows / (cap * 1.06 + 0.45 + 1.3);
+    const d = Math.floor(Math.min(byW, byH, this.maxBall));
     const tubeW = Math.round(d * 1.24);
-    const tubeH = Math.round(d * (CAPACITY * 1.06 + 0.45));
+    const fullH = tubeHeight(d, cap);
     const rowH = H / rows;
-    const perRow = Math.ceil(n / rows);
     const x: number[] = [];
     const y: number[] = [];
+    const hgt: number[] = [];
+    const liftY: number[] = [];
     for (let i = 0; i < n; i++) {
       const r = Math.floor(i / perRow);
-      const inRow = r === rows - 1 ? n - perRow * (rows - 1) : perRow;
+      const inRow = Math.min(perRow, n - r * perRow);
       const col = i - r * perRow;
       const colW = W / perRow;
       const offset = (W - inRow * colW) / 2;
+      const top = Math.round(rowH * r + (rowH - fullH) / 2 + d * 0.6);
+      const th = tubeHeight(d, this.caps[i]!);
       x.push(Math.round(offset + colW * col + (colW - tubeW) / 2));
-      y.push(Math.round(rowH * r + (rowH - tubeH) / 2 + d * 0.55));
+      // shorter (helper) tubes stand on the same floor as the others
+      y.push(top + fullH - th);
+      hgt.push(th);
+      liftY.push(top - d * 1.08);
     }
-    this.geo = { d, tubeW, tubeH, x, y };
+    this.geo = { d, tubeW, x, y, hgt, liftY };
     this.el.style.setProperty('--d', `${d}px`);
     this.tubes.forEach((t, i) => {
       t.style.width = `${tubeW}px`;
-      t.style.height = `${tubeH}px`;
+      t.style.height = `${hgt[i]}px`;
       t.style.transform = `translate(${x[i]}px, ${y[i]}px)`;
     });
     this.balls.forEach((stack, i) =>
       stack.forEach((b, k) => {
         const lifted = this.lifted === i && k === stack.length - 1;
-        const p = lifted ? this.liftPos(i) : this.slotPos(i, k);
-        this.glide(b, [p], animate ? 260 : 0);
+        this.glide(b, [lifted ? this.liftPos(i) : this.slotPos(i, k)], animate ? 260 : 0);
       }),
     );
   }
 
-  /** Index of the tube closest to a screen point (within half a column / row), or -1. */
+  /** Index of the tube closest to a screen point, or -1. */
   tubeAt(clientX: number, clientY: number): number {
     const g = this.geo;
     if (!g) return -1;
@@ -153,9 +220,7 @@ export class BoardView {
     let bestD = Infinity;
     for (let i = 0; i < this.tubes.length; i++) {
       const cx = g.x[i]! + g.tubeW / 2;
-      const top = g.y[i]! - g.d * 1.2;
-      const bottom = g.y[i]! + g.tubeH + g.d * 0.4;
-      if (py < top || py > bottom) continue;
+      if (py < g.liftY[i]! - g.d * 0.2 || py > g.y[i]! + g.hgt[i]! + g.d * 0.4) continue;
       const dx = Math.abs(px - cx);
       if (dx < bestD) {
         bestD = dx;
@@ -167,14 +232,12 @@ export class BoardView {
 
   private slotPos(tube: number, k: number): [number, number] {
     const g = this.geo!;
-    const bx = g.x[tube]! + (g.tubeW - g.d) / 2;
-    const by = g.y[tube]! + g.tubeH - g.d * 0.13 - (k + 1) * g.d * 1.04;
-    return [bx, by];
+    return [g.x[tube]! + (g.tubeW - g.d) / 2, g.y[tube]! + g.hgt[tube]! - g.d * 0.13 - (k + 1) * g.d * 1.04];
   }
 
   private liftPos(tube: number): [number, number] {
     const g = this.geo!;
-    return [g.x[tube]! + (g.tubeW - g.d) / 2, g.y[tube]! - g.d * 1.05];
+    return [g.x[tube]! + (g.tubeW - g.d) / 2, g.liftY[tube]!];
   }
 
   /** Animate a ball through waypoints. Starts from wherever it currently is, even mid-animation. */

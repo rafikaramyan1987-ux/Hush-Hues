@@ -1,21 +1,28 @@
 import { FREE_UNDOS, UNDOS_PER_AD } from './core/adPolicy';
-import { applyMove, canMove, cloneBoard, isSolved, isTubeComplete, starsFor, undoMove, type Board, type Move } from './core/board';
-import { getLevel, LEVEL_COUNT, type Level } from './core/levels';
-import { getBrowserStorage, load, recordWin, save, type SaveData } from './core/save';
+import { applyMove, canMove, cloneState, colorOf, hasAnyMove, isFrozen, isSolved, isTubeComplete, starsFor, type Move, type Puzzle, type State } from './core/board';
+import { getLevel } from './core/levelStore';
+import type { Level } from './core/levels';
+import { getBrowserStorage, load, recordWin, save, totalStars, type SaveData } from './core/save';
+import { kindOf, LEVEL_COUNT, type Mechanic } from './core/schedule';
 import { solve } from './core/solver';
-import { getLang, LANGS, setLang, t } from './i18n';
+import { getLang, LANGS, setLang, t, type Key } from './i18n';
 import { ads } from './platform/ads';
 import { audio, vibrate } from './platform/audio';
 import { BoardView } from './ui/boardView';
 import { h, svg } from './ui/dom';
 import { ICONS, LOGO } from './ui/icons';
+import { introArt } from './ui/intro';
 
 export type Screen = 'home' | 'levels' | 'play' | 'won';
 
 interface PlayState {
   level: Level;
-  board: Board;
-  history: Move[];
+  /** the level's puzzle, plus the extra tube once earned */
+  puzzle: Puzzle;
+  state: State;
+  /** states before each move (undo restores them exactly: ice, locks…) */
+  history: State[];
+  moves: Move[];
   selected: number | null;
   undosLeft: number;
   extraUsed: boolean;
@@ -25,6 +32,15 @@ interface PlayState {
 }
 
 const icon = (name: keyof typeof ICONS) => svg(ICONS[name]);
+
+const INTRO_TEXT: Record<Mechanic, [Key, Key]> = {
+  oneEmpty: ['introOneEmpty', 'introOneEmptyText'],
+  hidden: ['introHidden', 'introHiddenText'],
+  tall: ['introTall', 'introTallText'],
+  lock: ['introLock', 'introLockText'],
+  helper: ['introHelper', 'introHelperText'],
+  frozen: ['introFrozen', 'introFrozenText'],
+};
 
 export class Game {
   private kv = getBrowserStorage();
@@ -37,7 +53,7 @@ export class Game {
   private toastTimer = 0;
   private overlay: HTMLElement | null = null;
   private busy = false;
-  private hud: { level: HTMLElement; moves: HTMLElement; undo: HTMLButtonElement; undoBadge: HTMLElement; extra: HTMLButtonElement } | null = null;
+  private hud: { moves: HTMLElement; undo: HTMLButtonElement; undoBadge: HTMLElement; extra: HTMLButtonElement } | null = null;
   private hidden = false;
   private adPlaying = false;
 
@@ -120,6 +136,10 @@ export class Game {
     return btn;
   }
 
+  private starCount(): HTMLElement {
+    return h('span', { class: 'star-count', 'data-testid': 'star-total', 'aria-label': t('stars', { n: totalStars(this.data, kindOf) }) }, svg(ICONS.star), String(totalStars(this.data, kindOf)));
+  }
+
   /* ------------------------------------------------------------------ home */
 
   home(): void {
@@ -127,7 +147,7 @@ export class Game {
     const content = h(
       'section',
       { class: 'home', 'data-testid': 'home' },
-      h('div', { class: 'topbar' }, this.settingsButton(), h('span', { class: 'spacer' }), this.soundButton()),
+      h('div', { class: 'topbar' }, this.settingsButton(), h('span', { class: 'spacer' }), this.starCount(), h('span', { class: 'spacer' }), this.soundButton()),
       h('div', { class: 'logo' }, svg(LOGO)),
       h('h1', { class: 'title', text: t('title') }),
       h('p', { class: 'tagline', text: t('tagline') }),
@@ -208,19 +228,18 @@ export class Game {
     if (this.screen === 'home') this.home();
     else if (this.screen === 'levels') this.levelSelect();
     else if (this.play) {
-      // keep the board as it is, just rebuild the chrome
       const p = this.play;
       this.renderPlay();
       if (p.won) this.showWin(false);
     }
   }
 
-  private showOverlay(panel: HTMLElement): void {
+  private showOverlay(panel: HTMLElement, dismissable = true): void {
     this.closeOverlay();
     const ov = h('div', {
       class: 'overlay',
       onpointerdown: (e: Event) => {
-        if (e.target === ov && this.screen !== 'won') this.closeOverlay();
+        if (e.target === ov && dismissable && this.screen !== 'won') this.closeOverlay();
       },
     });
     ov.append(panel);
@@ -246,18 +265,20 @@ export class Game {
     for (let n = 1; n <= LEVEL_COUNT; n++) {
       const locked = n > this.data.unlocked;
       const stars = this.data.stars[n - 1] ?? 0;
+      const hard = kindOf(n) === 'hard';
       const btn = h(
         'button',
         {
-          class: `cell${locked ? ' locked' : ''}${stars ? ' done' : ''}`,
+          class: `cell${locked ? ' locked' : ''}${stars ? ' done' : ''}${hard ? ' hard' : ''}`,
           type: 'button',
           'data-testid': `level-${n}`,
-          'aria-label': locked ? `${t('level', { n })} — ${t('locked')}` : `${t('level', { n })}${stars ? ` — ${t('stars', { n: stars })}` : ''}`,
+          'aria-label': `${t('level', { n })}${hard ? ` — ${t('hardLevel')}` : ''}${locked ? ` — ${t('locked')}` : stars ? ` — ${t('stars', { n: stars })}` : ''}`,
           disabled: locked,
           onclick: () => this.startLevel(n),
         },
         locked ? icon('lock') : h('span', { class: 'num', text: n }),
         !locked && h('span', { class: 'mini-stars' }, ...[1, 2, 3].map((i) => h('i', { class: i <= stars ? 'on' : '' }))),
+        hard && h('span', { class: 'hard-dot', 'aria-hidden': 'true' }, svg(ICONS.flame)),
       );
       if (n === this.data.unlocked) current = btn;
       grid.append(btn);
@@ -270,6 +291,7 @@ export class Game {
         { class: 'topbar' },
         h('button', { class: 'icon-btn', type: 'button', 'data-testid': 'back', 'aria-label': t('back'), onclick: () => this.home() }, icon('back')),
         h('h2', { text: t('levels') }),
+        this.starCount(),
         this.soundButton(),
       ),
       h('div', { class: 'grid-wrap' }, grid),
@@ -285,11 +307,13 @@ export class Game {
   /* ------------------------------------------------------------------ play */
 
   startLevel(n: number): void {
-    const level = getLevel(Math.max(1, Math.min(LEVEL_COUNT, n)));
+    const level = getLevel(n);
     this.play = {
       level,
-      board: cloneBoard(level.board),
+      puzzle: { ...level.puzzle, tubes: level.puzzle.tubes.slice() },
+      state: cloneState(level.start),
       history: [],
+      moves: [],
       selected: null,
       undosLeft: FREE_UNDOS,
       extraUsed: false,
@@ -297,12 +321,40 @@ export class Game {
       won: false,
     };
     this.renderPlay();
+    if (level.intro && !this.data.seenIntros.includes(level.intro)) this.showIntro(level.intro);
+  }
+
+  /** One screen that shows the new mechanic with a little picture before the level starts. */
+  private showIntro(m: Mechanic): void {
+    const [title, text] = INTRO_TEXT[m];
+    const panel = h(
+      'div',
+      { class: 'panel intro', 'data-testid': 'intro', 'data-mechanic': m },
+      h('span', { class: 'chip new', text: t('newIdea') }),
+      introArt(m),
+      h('h2', { text: t(title) }),
+      h('p', { class: 'muted', text: t(text) }),
+      h(
+        'button',
+        {
+          class: 'btn primary',
+          type: 'button',
+          'data-testid': 'intro-ok',
+          onclick: () => {
+            if (!this.data.seenIntros.includes(m)) this.data.seenIntros.push(m);
+            this.persist();
+            this.closeOverlay();
+          },
+        },
+        t('gotIt'),
+      ),
+    );
+    this.showOverlay(panel, false);
   }
 
   private renderPlay(): void {
     const p = this.play!;
     const view = new BoardView((i) => this.tap(i));
-    const levelEl = h('div', { class: 'lvl', 'data-testid': 'level-label', text: t('level', { n: p.level.n }) });
     const movesEl = h('div', { class: 'moves', 'data-testid': 'moves' });
     const undoBadge = h('span', { class: 'badge' });
     const undo = h(
@@ -325,25 +377,34 @@ export class Game {
       icon('restart'),
       h('span', { class: 'lbl', text: t('restart') }),
     );
+    const kind = p.level.kind;
+    const chip =
+      kind === 'hard'
+        ? h('span', { class: 'chip hard', 'data-testid': 'hard-badge' }, svg(ICONS.flame), t('hardLevel'), h('b', { text: '×2' }))
+        : kind === 'relax'
+          ? h('span', { class: 'chip relax', 'data-testid': 'relax-badge' }, svg(ICONS.leaf), t('relaxLevel'))
+          : null;
     const content = h(
       'section',
-      { class: 'play', 'data-testid': 'play-screen', 'data-level': p.level.n },
+      { class: `play kind-${kind}`, 'data-testid': 'play-screen', 'data-level': p.level.n },
       h(
         'div',
         { class: 'topbar' },
         h('button', { class: 'icon-btn', type: 'button', 'data-testid': 'home', 'aria-label': t('home'), onclick: () => this.home() }, icon('home')),
-        h('div', { class: 'title-block' }, levelEl, movesEl),
+        h('div', { class: 'title-block' }, h('div', { class: 'lvl', 'data-testid': 'level-label', text: t('level', { n: p.level.n }) }), movesEl),
         this.soundButton(),
       ),
-      h('div', { class: 'hint-text', 'data-testid': 'hint', text: p.tutorial ? t('hint') : '' }),
+      h('div', { class: 'hint-text', 'data-testid': 'hint' }, chip ?? (p.tutorial ? t('hint') : '')),
       view.el,
       h('div', { class: 'toolbar' }, undo, extra, restart),
     );
     this.setScreen('play', content);
     this.view = view;
-    this.hud = { level: levelEl, moves: movesEl, undo, undoBadge, extra };
-    view.setBoard(p.board);
-    p.board.forEach((tube, i) => view.setComplete(i, isTubeComplete(tube) ? tube[0]! : null));
+    this.hud = { moves: movesEl, undo, undoBadge, extra };
+    view.setBoard(p.puzzle, p.state, p.level.hidden);
+    // a restart or a language change re-renders: balls already revealed stay revealed
+    if (p.moves.length) view.revealTops();
+    p.state.balls.forEach((tube, i) => view.setComplete(i, isTubeComplete(p.puzzle, tube) ? colorOf(tube[0]!) : null));
     if (p.selected !== null) view.lift(p.selected);
     view.setSelected(p.selected);
     this.updateHud();
@@ -353,11 +414,11 @@ export class Game {
   private updateHud(): void {
     const p = this.play;
     if (!p || !this.hud) return;
-    this.hud.moves.textContent = t('moves', { n: p.history.length });
+    this.hud.moves.textContent = t('moves', { n: p.moves.length });
     const needAd = p.undosLeft <= 0;
     this.hud.undoBadge.replaceChildren(needAd ? svg(ICONS.ad) : String(p.undosLeft));
     this.hud.undoBadge.classList.toggle('ad', needAd);
-    this.hud.undo.disabled = p.history.length === 0 || p.won;
+    this.hud.undo.disabled = p.moves.length === 0 || p.won;
     this.hud.extra.disabled = p.extraUsed || p.won;
     this.hud.extra.classList.toggle('used', p.extraUsed);
   }
@@ -369,7 +430,7 @@ export class Game {
       this.view.setHint(null);
       return;
     }
-    const m = p.level.solution[p.history.length];
+    const m = p.level.solution[p.moves.length];
     if (!m) return this.view.setHint(null);
     this.view.setHint(p.selected === null ? m.from : p.selected === m.from ? m.to : null);
   }
@@ -378,48 +439,40 @@ export class Game {
     vibrate(this.data.settings.vibration, pattern);
   }
 
+  /** Can the player pick up the top ball of this tube? */
+  private liftable(i: number): boolean {
+    const p = this.play!;
+    const tube = p.state.balls[i]!;
+    return tube.length > 0 && !p.state.locked[i] && !isFrozen(tube[tube.length - 1]!) && !isTubeComplete(p.puzzle, tube);
+  }
+
   tap(i: number): void {
     const p = this.play;
     const view = this.view;
     if (!p || !view || p.won || this.busy || this.overlay) return;
-    const tube = p.board[i];
-    if (!tube) return;
+    if (!p.state.balls[i]) return;
     if (p.selected === null) {
-      if (tube.length === 0 || isTubeComplete(tube)) {
+      if (!this.liftable(i)) {
         view.shake(i);
+        if (p.state.locked[i] || p.state.balls[i]!.length) audio.nope();
         return;
       }
       p.selected = i;
       view.lift(i);
-      audio.lift(tube[tube.length - 1]!);
+      const tube = p.state.balls[i]!;
+      audio.lift(colorOf(tube[tube.length - 1]!));
     } else if (p.selected === i) {
       view.lower(i);
       p.selected = null;
-    } else if (canMove(p.board, p.selected, i)) {
-      const from = p.selected;
-      const color = p.board[from]![p.board[from]!.length - 1]!;
-      applyMove(p.board, { from, to: i });
-      if (p.tutorial && !sameMove(p.level.solution[p.history.length], { from, to: i })) p.tutorial = false;
-      p.history.push({ from, to: i });
-      p.selected = null;
-      const ms = view.move(from, i);
-      const done = isTubeComplete(p.board[i]!);
-      window.setTimeout(() => {
-        audio.drop(color);
-        this.haptic(done ? [12, 40, 18] : 8);
-        if (done) {
-          audio.tubeDone(color);
-          view.setComplete(i, color);
-        }
-      }, ms * 0.85);
-      if (isSolved(p.board)) this.win(ms);
+    } else if (canMove(p.puzzle, p.state, p.selected, i)) {
+      this.doMove(p.selected, i);
     } else {
       // not allowed: put the ball back and pick up the tapped tube instead (if it can be picked)
       audio.nope();
       view.shake(i);
       view.lower(p.selected);
       p.selected = null;
-      if (tube.length > 0 && !isTubeComplete(tube)) {
+      if (this.liftable(i)) {
         p.selected = i;
         view.lift(i);
       }
@@ -427,6 +480,58 @@ export class Game {
     view.setSelected(p.selected);
     this.updateHud();
     this.updateHint();
+  }
+
+  private doMove(from: number, to: number): void {
+    const p = this.play!;
+    const view = this.view!;
+    const src = p.state.balls[from]!;
+    const color = colorOf(src[src.length - 1]!);
+    const before = cloneState(p.state);
+    const fx = applyMove(p.puzzle, p.state, { from, to });
+    if (!fx) return;
+    if (p.tutorial && !sameMove(p.level.solution[p.moves.length], { from, to })) p.tutorial = false;
+    p.history.push(before);
+    p.moves.push({ from, to });
+    p.selected = null;
+    const ms = view.move(from, to);
+    window.setTimeout(() => {
+      audio.drop(color);
+      this.haptic(fx.completed ? [12, 40, 18] : 8);
+      if (fx.completed) {
+        audio.tubeDone(color);
+        view.setComplete(to, color);
+      }
+      if (view.revealTops()) audio.reveal();
+      if (fx.thawed.length) audio.thaw();
+      if (fx.unlocked.length) audio.opened();
+      view.applyStatus(p.state);
+    }, ms * 0.85);
+    if (isSolved(p.puzzle, p.state)) this.win(ms);
+    else if (!hasAnyMove(p.puzzle, p.state)) window.setTimeout(() => this.play === p && this.showStuck(), ms + 300);
+  }
+
+  /** No losing: when no move is possible, offer a way out. */
+  private showStuck(): void {
+    const p = this.play;
+    if (!p || p.won || this.overlay) return;
+    const panel = h(
+      'div',
+      { class: 'panel', 'data-testid': 'stuck' },
+      h('h2', { text: t('stuckTitle') }),
+      h('p', { class: 'muted', text: t('stuckText') }),
+      h('button', { class: 'btn primary', type: 'button', 'data-testid': 'stuck-undo', onclick: () => (this.closeOverlay(), void this.undo()) }, icon('undo'), t('undo')),
+      !p.extraUsed &&
+        h(
+          'button',
+          { class: 'btn', type: 'button', 'data-testid': 'stuck-extra', onclick: () => (this.closeOverlay(), void this.extraTube()) },
+          icon('tube'),
+          t('extraTube'),
+          h('span', { class: 'badge-inline' }, svg(ICONS.ad)),
+        ),
+      h('button', { class: 'btn', type: 'button', 'data-testid': 'stuck-restart', onclick: () => this.restart() }, icon('restart'), t('restart')),
+    );
+    this.showOverlay(panel);
   }
 
   private async rewarded(): Promise<boolean> {
@@ -446,7 +551,7 @@ export class Game {
 
   async undo(): Promise<void> {
     const p = this.play;
-    if (!p || !this.view || p.won || p.history.length === 0 || this.busy) return;
+    if (!p || !this.view || p.won || p.moves.length === 0 || this.busy) return;
     if (p.undosLeft <= 0) {
       if (!(await this.rewarded())) return;
       if (this.play !== p) return;
@@ -456,14 +561,15 @@ export class Game {
       this.view.lower(p.selected);
       p.selected = null;
     }
-    const m = p.history.pop()!;
-    if (isTubeComplete(p.board[m.to]!)) this.view.setComplete(m.to, null);
-    undoMove(p.board, m);
+    const m = p.moves.pop()!;
+    p.state = p.history.pop()!;
     p.undosLeft--;
     p.tutorial = false;
     this.view.move(m.to, m.from);
-    const ball = p.board[m.from]![p.board[m.from]!.length - 1]!;
-    audio.lift(ball);
+    this.view.applyStatus(p.state, false);
+    p.state.balls.forEach((tube, i) => this.view!.setComplete(i, isTubeComplete(p.puzzle, tube) ? colorOf(tube[0]!) : null));
+    const tube = p.state.balls[m.from]!;
+    audio.lift(colorOf(tube[tube.length - 1]!));
     this.view.setSelected(null);
     this.updateHud();
     this.updateHint();
@@ -476,8 +582,13 @@ export class Game {
     if (this.play !== p || p.extraUsed) return;
     p.extraUsed = true;
     p.tutorial = false;
-    p.board.push([]);
-    this.view.addTube();
+    p.puzzle.tubes.push({ cap: p.puzzle.perColor, lock: null });
+    // the extra tube exists in every saved state too, so undo keeps it
+    for (const s of [p.state, ...p.history]) {
+      s.balls.push([]);
+      s.locked.push(false);
+    }
+    this.view.addTube(p.puzzle.perColor);
     audio.tubeDone(1);
     this.updateHud();
     this.updateHint();
@@ -488,16 +599,19 @@ export class Game {
     if (!p || this.busy) return;
     audio.tap();
     // the extra tube stays if it was earned; undos reset to the free amount
-    const board = cloneBoard(p.level.board);
-    if (p.extraUsed) board.push([]);
-    Object.assign(p, { board, history: [], selected: null, undosLeft: FREE_UNDOS, tutorial: p.level.n === 1, won: false });
+    const state = cloneState(p.level.start);
+    if (p.extraUsed) {
+      state.balls.push([]);
+      state.locked.push(false);
+    }
+    Object.assign(p, { state, history: [], moves: [], selected: null, undosLeft: FREE_UNDOS, tutorial: p.level.n === 1, won: false });
     this.renderPlay();
   }
 
   private win(delayMs: number): void {
     const p = this.play!;
     p.won = true;
-    const stars = starsFor(p.history.length, p.level.par);
+    const stars = starsFor(p.moves.length, p.level.par);
     this.data = recordWin(this.data, p.level.n, stars);
     this.persist();
     this.syncGameplay();
@@ -516,14 +630,16 @@ export class Game {
 
   private showWin(animate: boolean): void {
     const p = this.play!;
-    const stars = starsFor(p.history.length, p.level.par);
+    const stars = starsFor(p.moves.length, p.level.par);
     const isLast = p.level.n >= LEVEL_COUNT;
+    const hard = p.level.kind === 'hard';
     const panel = h(
       'div',
       { class: `panel win${animate ? ' animate' : ''}`, 'data-testid': 'win', 'data-stars': stars },
       h('h2', { text: t('sorted') }),
       h('div', { class: 'stars' }, ...[1, 2, 3].map((i) => h('span', { class: `star${i <= stars ? ' on' : ''}`, style: `--i:${i}` }, svg(ICONS.star)))),
-      h('p', { class: 'muted', text: `${t('level', { n: p.level.n })} · ${t('moves', { n: p.history.length })}` }),
+      hard && h('p', { class: 'chip hard', 'data-testid': 'x2' }, svg(ICONS.flame), t('doubleStars')),
+      h('p', { class: 'muted', text: `${t('level', { n: p.level.n })} · ${t('moves', { n: p.moves.length })}` }),
       !isLast && h('button', { class: 'btn primary big', type: 'button', 'data-testid': 'next', onclick: () => void this.next() }, t('next')),
       h(
         'div',
@@ -551,7 +667,7 @@ export class Game {
   }
 
   private onKey(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && this.overlay && this.screen !== 'won') {
+    if (e.key === 'Escape' && this.overlay && this.screen !== 'won' && !this.overlay.querySelector('[data-testid=intro]')) {
       this.closeOverlay();
       return;
     }
@@ -569,10 +685,14 @@ export class Game {
     return {
       screen: () => this.screen,
       level: () => this.play?.level.n ?? 0,
-      moves: () => this.play?.history.length ?? 0,
-      board: () => (this.play ? cloneBoard(this.play.board) : []),
+      moves: () => this.play?.moves.length ?? 0,
       /** moves that solve the current board from here (null if none found) */
-      solution: (): Move[] | null => (this.play ? solve(this.play.board) : null),
+      solution: (): Move[] | null => {
+        const p = this.play;
+        if (!p) return null;
+        if (p.moves.length === 0 && !p.extraUsed) return p.level.solution;
+        return solve(p.puzzle, p.state);
+      },
     };
   }
 }

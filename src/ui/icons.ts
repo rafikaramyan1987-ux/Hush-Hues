@@ -15,6 +15,8 @@ export const ICONS = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5Z" fill="currentColor"/></svg>',
   ad: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="3.5" fill="currentColor"/><path d="M10 9v6l5-3Z" fill="#fff"/></svg>',
   lock: wrap('<rect x="5.5" y="10.5" width="13" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>'),
+  flame: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c.6 3.2 4.8 5.4 4.8 10.2A4.8 4.8 0 0 1 12 18a4.8 4.8 0 0 1-4.8-4.8c0-2.2 1.2-3.6 2.3-4.6.1 1.6.8 2.7 1.8 3.2C11 9.4 11.3 6 12 3Z" fill="currentColor"/></svg>',
+  leaf: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 4C9 4 5 9 5 14.5c0 1.5.4 2.8 1 3.9C8 13 11.5 10.5 15 9c-3.2 2-6 5.3-7.3 10A6.8 6.8 0 0 0 11 20c6 0 8-6.5 8-16Z" fill="currentColor"/></svg>',
   star: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2l2.7 5.6 6.1.8-4.5 4.2 1.2 6L12 16.9 6.5 19.8l1.2-6-4.5-4.2 6.1-.8Z" fill="currentColor"/></svg>',
 } as const;
 
@@ -31,3 +33,7 @@ export const LOGO = `<svg viewBox="0 0 120 120" aria-hidden="true">
   <circle cx="60" cy="24" r="12" fill="url(#lg-c)" opacity=".9"/>
   <path d="M46 30v58" stroke="rgba(255,255,255,.45)" stroke-width="3" stroke-linecap="round"/>
 </svg>`;
+
+/** Padlock drawn on locked tubes (the keyhole dot shows the colour that opens it). */
+export const LOCK_SVG =
+  '<svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5" fill="currentColor"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" stroke-width="2.4"/></svg>';

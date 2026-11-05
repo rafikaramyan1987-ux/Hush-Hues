@@ -5,10 +5,19 @@ A ball may only land in an empty tube or on a ball of the same colour (4 balls p
 tube holds one colour.
 
 - **Relaxing by design**: no timer, no way to lose, restart any time.
-- **300 levels**, generated deterministically from a seed. Every level is built by playing **reverse moves** from a
-  sorted board, so it is always solvable (a solver checks the first 300 in the unit tests).
-- **Gentle curve**: levels 1–5 are a 3-colour tutorial, then one more colour every few levels up to 12, with the
-  scramble growing slowly inside each step: no difficulty spikes.
+- **300 levels**, generated deterministically from seeds (`npm run levels` → `src/data/levels.json`). Each board's
+  layout is rebuilt by playing **reverse moves** from a sorted board, then the whole level (with its mechanics) is
+  verified by replaying the solution; the unit tests replay every solution and run the solver on all 300 levels.
+- **New ideas, one at a time**, each with a one-screen visual intro, then mixed into later levels:
+  L11 one empty tube · L21 hidden "?" balls · L35 taller tubes (5) · L51 locked tube (opens when its colour is done) ·
+  L71 helper tubes (hold 2) · L91 frozen balls (thaw after a move next to them).
+  (Every 10th level is a hard one, so intros that would land on L20/L50/L70/L90 come one level later.)
+- **Rhythm**: every 5th level is a breather (easier than the one before), every 10th a "Hard level" (harder than the
+  one before, stars count ×2); never two hard levels in a row.
+- **Difficulty is measured** with the solver (log₂ of states explored + dead-end share + hidden balls) and rises
+  smoothly inside each colour band: never easier than the previous normal level, never a jump > 2.5.
+  `npm test` prints the table for levels 1–150.
+- **No losing**: when no move is left, a calm panel offers Undo, Restart or "+1 tube".
 - **Undo**: 3 free per level, more with an optional rewarded ad. **Extra empty tube**: once per level with an optional
   rewarded ad.
 - **Stars** by number of moves (finishing always gives at least one), **level select**, progress saved in
@@ -28,14 +37,17 @@ npm run e2e          # Playwright smoke test at 390px (builds + previews automat
 npm run build        # web build -> dist/ (GitHub Pages)
 npm run zip:crazygames  # CrazyGames build -> dist-crazygames/ and hush-hues-crazygames.zip
 npm run icons        # re-render the PNG icons from public/favicon.svg
+npm run levels       # regenerate src/data/levels.json from the seeds (~15 min)
 ```
 
 ## Project layout
 
 ```
-src/core/board.ts    rules: legal move, apply/undo, win, stars
-src/core/levels.ts   difficulty curve + deterministic level generator (reverse moves from a solved board)
-src/core/solver.ts   A* solver (tests, par for stars, debug hook)
+src/core/board.ts    rules: legal move, capacities, locks, ice, win, stars
+src/core/schedule.ts colours per band, rhythm (relax/hard), which mechanics each level uses
+src/core/levels.ts   generator: seeded candidate boards, reverse-move rebuild, difficulty score, band selection
+src/core/solver.ts   A* solver (nodes explored + dead-end ratio, par for stars, tests, debug hook)
+src/data/levels.json the 300 pre-generated levels (compact, see levelCodec.ts)
 src/core/save.ts     progress + settings (localStorage, try/catch everywhere)
 src/core/adPolicy.ts midgame-ad rules (not before level 3, 3-minute cooldown), undo/ad amounts
 src/ui/              board view (DOM + Web Animations), palette & symbols, icons, DOM helpers
@@ -47,13 +59,18 @@ tests/               Vitest unit tests      e2e/  Playwright smoke test (390px: 
 
 ## Hosting
 
+The build uses relative paths only (`base: './'`), so it works under any GitHub Pages path (`/Last-Breath/`,
+`/Hush-Hues/`, …). CI checks it, and an e2e test loads the game from an arbitrary sub-folder.
+
+
 `.github/workflows/ci.yml` runs lint, typecheck, unit tests, the bundle-size check (< 5 MB), the Playwright smoke test,
 builds the CrazyGames package (uploaded as the `hush-hues-crazygames` artifact) and deploys `dist/` to GitHub Pages on
 every push.
 
+Submission material (covers, preview videos, descriptions): [`submission/`](submission/README.md).
 See [docs/CRAZYGAMES.md](docs/CRAZYGAMES.md) for the CrazyGames integration and submission checklist.
 
 ## Debug hook
 
-Builds other than the CrazyGames one expose `window.__hh` (`screen()`, `level()`, `moves()`, `board()`, `solution()`)
+Builds other than the CrazyGames one expose `window.__hh` (`screen()`, `level()`, `moves()`, `solution()`), and `?cover` renders the store-art scene
 for the automated tests.

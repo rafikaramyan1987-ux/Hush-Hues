@@ -1,4 +1,4 @@
-import { LEVEL_COUNT } from './levels';
+import { LEVEL_COUNT, MECHANICS, type Kind, type Mechanic } from './schedule';
 
 export const SAVE_KEY = 'hush-hues.save.v1';
 
@@ -17,6 +17,8 @@ export interface SaveData {
   /** best stars per level, index = level - 1 (0 = not completed) */
   stars: number[];
   settings: Settings;
+  /** mechanics whose intro screen was already shown */
+  seenIntros: Mechanic[];
 }
 
 export const defaultSave = (): SaveData => ({
@@ -24,6 +26,7 @@ export const defaultSave = (): SaveData => ({
   unlocked: 1,
   stars: [],
   settings: { lang: null, muted: false, vibration: true, symbols: false },
+  seenIntros: [],
 });
 
 /** Minimal storage interface so tests can inject a fake and a broken localStorage never crashes the game. */
@@ -65,6 +68,7 @@ export function sanitize(raw: unknown): SaveData {
       vibration: se.vibration !== false,
       symbols: se.symbols === true,
     },
+    seenIntros: Array.isArray(r.seenIntros) ? MECHANICS.filter((m) => (r.seenIntros as unknown[]).includes(m)) : [],
   };
 }
 
@@ -96,4 +100,6 @@ export function recordWin(data: SaveData, level: number, stars: number): SaveDat
   return { ...data, stars: s, unlocked: Math.min(LEVEL_COUNT, Math.max(data.unlocked, level + 1)) };
 }
 
-export const totalStars = (d: SaveData): number => d.stars.reduce((a, b) => a + b, 0);
+/** Total stars; stars of "hard" levels count double (their reward). */
+export const totalStars = (d: SaveData, kindOf: (n: number) => Kind): number =>
+  d.stars.reduce((a, s, i) => a + s * (kindOf(i + 1) === 'hard' ? 2 : 1), 0);

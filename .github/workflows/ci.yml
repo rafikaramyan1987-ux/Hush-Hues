@@ -27,6 +27,10 @@ jobs:
       - run: npm test
       - name: Build (web / GitHub Pages)
         run: npm run build
+      - name: Build is path-independent (works under any repo name)
+        run: |
+          grep -q 'src="./assets/' dist/index.html
+          ! grep -rnE '"/assets/|Last-Breath|Hush-Hues/' dist/
       - name: Bundle size must stay under 5 MB
         run: |
           size=$(du -sb dist | cut -f1)
@@ -38,6 +42,13 @@ jobs:
           npm run e2e
       - name: Build CrazyGames package
         run: npm run build:crazygames
+      - name: CrazyGames package limits (< 50 MB, < 1500 files)
+        run: |
+          size=$(du -sb dist-crazygames | cut -f1)
+          files=$(find dist-crazygames -type f | wc -l)
+          echo "size $size bytes, $files files"
+          test "$size" -lt 50000000
+          test "$files" -lt 1500
       - name: Upload CrazyGames build (download = ready-to-upload zip)
         uses: actions/upload-artifact@v4
         with:

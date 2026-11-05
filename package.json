@@ -16,6 +16,7 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "icons": "node scripts/icons.mjs",
+    "levels": "node scripts/gen-levels.mjs",
     "check": "npm run lint && npm run typecheck && npm run test"
   },
   "devDependencies": {

@@ -1,53 +1,76 @@
-import { CAPACITY, type Board, type Move } from './board';
+import { applyMove, canMove, cloneState, colorOf, isFrozen, isSolved, isTubeComplete, type Move, type Puzzle, type State } from './board';
+
+export interface SolveResult {
+  /** forward moves to a solved board, or null if none was found within the node budget */
+  moves: Move[] | null;
+  /** states expanded by the search: how much exploring the board needs */
+  nodes: number;
+  /** share of expanded states that led nowhere new (every move goes back to a known state): how "tight" the board is */
+  deadEndRatio: number;
+}
+
+export interface SolveOptions {
+  maxNodes?: number;
+  /** 1 = plain A* (shortest solutions); >1 = faster, slightly longer solutions */
+  weight?: number;
+}
 
 /**
- * Weighted A* solver for single-ball moves. Used by the unit tests (every level must be solvable),
- * to compute each level's "par" (star thresholds) and by the debug hook of the e2e test.
- * The heuristic (balls that must still move at least once) never overestimates, so weight 1 gives optimal paths.
- * Returns the list of moves, or null if no solution was found within `maxNodes` expanded states.
+ * Weighted A* over single-ball moves with every mechanic (capacities, locks, frozen balls).
+ * The heuristic counts balls that must still move at least once, so weight 1 gives optimal paths.
+ * Used to plan and measure levels when generating them, by the unit tests and by the debug hook.
  */
-export function solve(start: Board, opts: { cap?: number; maxNodes?: number; weight?: number } = {}): Move[] | null {
-  const cap = opts.cap ?? CAPACITY;
+export function solveFull(p: Puzzle, start: State, opts: SolveOptions = {}): SolveResult {
   const maxNodes = opts.maxNodes ?? 200_000;
-  // weight 1 = plain A* (shortest solutions, fine for small boards); >1 = faster, slightly longer solutions
-  const W = opts.weight ?? 2;
-  const key = (b: Board): string => b.map((t) => t.join(',')).sort().join('|');
+  const W = opts.weight ?? 1.5;
 
-  const heuristic = (b: Board): number => {
+  const key = (s: State): string => {
+    const free = !s.locked.some(Boolean) && !s.balls.some((t) => t.some(isFrozen));
+    const parts = s.balls.map((t, i) => `${p.tubes[i]!.cap}${s.locked[i] ? 'L' : ''}:${t.join(',')}`);
+    // without locks or ice, tubes of the same size are interchangeable: sort them to merge symmetric states
+    return free ? parts.sort().join('|') : parts.join('|');
+  };
+
+  const heuristic = (s: State): number => {
     let h = 0;
     const bestRun = new Map<number, number>();
     const sumRun = new Map<number, number>();
-    for (const t of b) {
-      if (t.length === 0) continue;
+    s.balls.forEach((t, i) => {
+      if (t.length === 0) return;
+      const c = colorOf(t[0]!);
+      // balls in a helper tube (or a tube too short for a full colour) always have to move
+      if (p.tubes[i]!.cap < p.perColor) {
+        h += t.length;
+        return;
+      }
       let run = 1;
-      while (run < t.length && t[run] === t[0]) run++;
+      while (run < t.length && colorOf(t[run]!) === c) run++;
       h += t.length - run;
-      const c = t[0]!;
       bestRun.set(c, Math.max(bestRun.get(c) ?? 0, run));
       sumRun.set(c, (sumRun.get(c) ?? 0) + run);
-    }
-    for (const [c, s] of sumRun) h += s - bestRun.get(c)!;
+    });
+    for (const [c, sum] of sumRun) h += sum - bestRun.get(c)!;
     return h;
   };
 
   interface Node {
-    board: Board;
+    s: State;
     g: number;
     f: number;
     parent: Node | null;
     move: Move | null;
   }
 
-  // binary min-heap on f
+  // binary min-heap on f (ties: insertion order is irrelevant for correctness, deterministic anyway)
   const heap: Node[] = [];
   const push = (n: Node) => {
     heap.push(n);
     let i = heap.length - 1;
     while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (heap[p]!.f <= n.f) break;
-      heap[i] = heap[p]!;
-      i = p;
+      const par = (i - 1) >> 1;
+      if (heap[par]!.f <= n.f) break;
+      heap[i] = heap[par]!;
+      i = par;
     }
     heap[i] = n;
   };
@@ -76,46 +99,61 @@ export function solve(start: Board, opts: { cap?: number; maxNodes?: number; wei
   };
 
   const seen = new Map<string, number>();
-  const h0 = heuristic(start);
-  push({ board: start.map((t) => t.slice()), g: 0, f: W * h0, parent: null, move: null });
+  push({ s: cloneState(start), g: 0, f: W * heuristic(start), parent: null, move: null });
   seen.set(key(start), 0);
   let expanded = 0;
+  let deadEnds = 0;
+  const n = start.balls.length;
 
   while (heap.length && expanded < maxNodes) {
     const node = pop();
+    if ((seen.get(key(node.s)) ?? Infinity) < node.g) continue; // stale entry
     expanded++;
-    const b = node.board;
-    if (heuristic(b) === 0 && b.every((t) => t.length === 0 || t.length === cap)) {
+    const s = node.s;
+    if (isSolved(p, s)) {
       const moves: Move[] = [];
-      for (let n: Node | null = node; n && n.move; n = n.parent) moves.push(n.move);
-      return moves.reverse();
+      for (let x: Node | null = node; x && x.move; x = x.parent) moves.push(x.move);
+      return { moves: moves.reverse(), nodes: expanded, deadEndRatio: deadEnds / expanded };
     }
-    let emptyTried = false;
-    for (let from = 0; from < b.length; from++) {
-      const src = b[from]!;
+    const anyFrozen = s.balls.some((t) => t.some(isFrozen));
+    let children = 0;
+    for (let from = 0; from < n; from++) {
+      const src = s.balls[from]!;
       if (src.length === 0) continue;
-      const c = src[src.length - 1]!;
-      const homogeneous = src.every((x) => x === c);
-      if (homogeneous && src.length === cap) continue;
-      emptyTried = false;
-      for (let to = 0; to < b.length; to++) {
-        if (to === from) continue;
-        const dst = b[to]!;
-        if (dst.length >= cap) continue;
+      if (isTubeComplete(p, src)) continue;
+      const c = colorOf(src[src.length - 1]!);
+      const homogeneous = src.every((b) => colorOf(b) === c) && p.tubes[from]!.cap >= p.perColor;
+      const emptyCapsTried = new Set<number>();
+      for (let to = 0; to < n; to++) {
+        if (!canMove(p, s, from, to)) continue;
+        const dst = s.balls[to]!;
         if (dst.length === 0) {
-          if (homogeneous || emptyTried) continue;
-          emptyTried = true;
-        } else if (dst[dst.length - 1] !== c) continue;
-        const nb = b.map((t) => t.slice());
-        nb[to]!.push(nb[from]!.pop()!);
-        const k = key(nb);
+          // moving a clean stack into an empty tube of the same size never helps
+          if (homogeneous && p.tubes[to]!.cap >= p.perColor) continue;
+          // equivalent empty tubes: try one of each size (unless ice makes positions matter)
+          const capKey = p.tubes[to]!.cap;
+          if (!anyFrozen) {
+            if (emptyCapsTried.has(capKey)) continue;
+            emptyCapsTried.add(capKey);
+          }
+        }
+        const ns = cloneState(s);
+        applyMove(p, ns, { from, to });
+        const k = key(ns);
         const g = node.g + 1;
         const prev = seen.get(k);
         if (prev !== undefined && prev <= g) continue;
         seen.set(k, g);
-        push({ board: nb, g, f: g + W * heuristic(nb), parent: node, move: { from, to } });
+        children++;
+        push({ s: ns, g, f: g + W * heuristic(ns), parent: node, move: { from, to } });
       }
     }
+    if (children === 0) deadEnds++;
   }
-  return null;
+  return { moves: null, nodes: expanded, deadEndRatio: expanded ? deadEnds / expanded : 0 };
+}
+
+/** Convenience: just the moves. */
+export function solve(p: Puzzle, s: State, opts?: SolveOptions): Move[] | null {
+  return solveFull(p, s, opts).moves;
 }

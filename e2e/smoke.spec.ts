@@ -82,3 +82,42 @@ test('undo, extra tube and restart work without the SDK', async ({ page }) => {
   await page.getByTestId('restart').tap();
   await expect(page.getByTestId('moves')).toHaveText('Moves 0');
 });
+
+test('works from any sub-path (repo name independent)', async ({ page }) => {
+  // serve the same build under an arbitrary folder, like GitHub Pages does for /<repo-name>/
+  // anything requested outside the sub-folder (an absolute "/assets/..." path) fails
+  await page.route(/^http:\/\/localhost:4173\/(?!Any-Repo-Name\/)/, (route) => route.abort());
+  await page.route('**/Any-Repo-Name/**', (route) => {
+    const url = route.request().url().replace('/Any-Repo-Name/', '/');
+    return route.continue({ url });
+  });
+  const errors: string[] = [];
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  await page.goto('/Any-Repo-Name/');
+  await expect(page.getByTestId('play')).toBeVisible();
+  await page.getByTestId('play').click();
+  await expect(page.getByTestId('level-label')).toHaveText('Level 1');
+  expect(errors).toEqual([]);
+});
+
+test('a new mechanic shows its intro once, and hard levels carry a badge', async ({ page }) => {
+  await page.evaluate(() =>
+    localStorage.setItem('hush-hues.save.v1', JSON.stringify({ version: 1, unlocked: 30, stars: [], settings: {}, seenIntros: [] })),
+  );
+  await page.reload();
+  await page.getByTestId('levels').click();
+  await page.getByTestId('level-21').click();
+  await expect(page.getByTestId('intro')).toHaveAttribute('data-mechanic', 'hidden');
+  await page.getByTestId('intro-ok').click();
+  await expect(page.getByTestId('intro')).toHaveCount(0);
+  expect(await page.locator('.ball.hidden').count()).toBeGreaterThan(0);
+  // seen once: not shown again
+  await page.getByTestId('restart').click();
+  await expect(page.getByTestId('intro')).toHaveCount(0);
+
+  await page.getByTestId('home').click();
+  await page.getByTestId('levels').click();
+  await expect(page.getByTestId('level-20')).toHaveClass(/hard/);
+  await page.getByTestId('level-20').click();
+  await expect(page.getByTestId('hard-badge')).toBeVisible();
+});

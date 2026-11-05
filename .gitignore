@@ -7,4 +7,3 @@ playwright-report/
 .vite/
 *.log
 .DS_Store
-covers/
